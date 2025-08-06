@@ -1,0 +1,9 @@
+[
+  {
+    "ticker": "SBER",
+    "action": "buy",
+    "amount": 10,
+    "price": 304.84,
+    "total": 3048.4
+  }
+]
