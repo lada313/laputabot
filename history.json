@@ -103,5 +103,12 @@
     "amount": 10,
     "price": 62.67,
     "total": 626.7
+  },
+  {
+    "ticker": "PIKK",
+    "action": "buy",
+    "amount": 1,
+    "price": 652.2,
+    "total": 652.2
   }
 ]
