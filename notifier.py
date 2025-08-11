@@ -5,10 +5,9 @@ import json
 import os
 import time
 from datetime import datetime
-from save_json import git_commit_and_push
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from analysis import get_liquidity_metrics, analyze_stock
-
+from save_json import enqueue_git_push
 
 logger = logging.getLogger("notifier")
 
@@ -62,7 +61,7 @@ def _save_open_trades(data: dict) -> None:
             raise ValueError("⚠️ Неверный формат данных open_trades")
         with open(OPEN_TRADES_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        git_commit_and_push("Update open_trades.json")
+        enqueue_git_push("Update open_trades.json")
     except Exception as e:
         logger.warning(f"Не удалось сохранить {OPEN_TRADES_FILE}: {e}")
 
