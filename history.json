@@ -1,0 +1,107 @@
+[
+  {
+    "ticker": "SBER",
+    "action": "buy",
+    "amount": 10,
+    "price": 304.84,
+    "total": 3048.4
+  },
+  {
+    "ticker": "SBER",
+    "action": "buy",
+    "amount": 10,
+    "price": 311.93,
+    "total": 3119.3
+  },
+  {
+    "ticker": "EUTR",
+    "action": "buy",
+    "amount": 2,
+    "price": 252.79,
+    "total": 505.58
+  },
+  {
+    "ticker": "EUTR",
+    "action": "sell",
+    "amount": "всё",
+    "price": "n/a",
+    "total": "n/a"
+  },
+  {
+    "ticker": "EUTR",
+    "action": "buy",
+    "amount": 2,
+    "price": 126.395,
+    "total": 252.79
+  },
+  {
+    "ticker": "AFLT",
+    "action": "buy",
+    "amount": 1,
+    "price": 626.7,
+    "total": 626.7
+  },
+  {
+    "ticker": "AFLT",
+    "action": "sell",
+    "amount": "всё",
+    "price": "n/a",
+    "total": "n/a"
+  },
+  {
+    "ticker": "AFLT",
+    "action": "buy",
+    "amount": 10,
+    "price": 62.67,
+    "total": 626.7
+  },
+  {
+    "ticker": "SBER",
+    "action": "sell",
+    "amount": "всё",
+    "price": "n/a",
+    "total": "n/a"
+  },
+  {
+    "ticker": "EUTR",
+    "action": "sell",
+    "amount": "всё",
+    "price": "n/a",
+    "total": "n/a"
+  },
+  {
+    "ticker": "AFLT",
+    "action": "sell",
+    "amount": "всё",
+    "price": "n/a",
+    "total": "n/a"
+  },
+  {
+    "ticker": "SBER",
+    "action": "buy",
+    "amount": 1,
+    "price": 304.84,
+    "total": 304.84
+  },
+  {
+    "ticker": "SBER",
+    "action": "buy",
+    "amount": 1,
+    "price": 311.93,
+    "total": 311.93
+  },
+  {
+    "ticker": "EUTR",
+    "action": "buy",
+    "amount": 2,
+    "price": 126.395,
+    "total": 252.79
+  },
+  {
+    "ticker": "AFLT",
+    "action": "buy",
+    "amount": 10,
+    "price": 62.67,
+    "total": 626.7
+  }
+]

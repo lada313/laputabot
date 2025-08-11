@@ -1,0 +1,14 @@
+{
+  "SBER": {
+    "price": 308.385,
+    "amount": 2
+  },
+  "EUTR": {
+    "price": 126.395,
+    "amount": 2
+  },
+  "AFLT": {
+    "price": 62.67,
+    "amount": 10
+  }
+}
