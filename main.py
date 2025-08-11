@@ -21,7 +21,7 @@ from analysis import analyze_stock
 from tinkoff.invest import AsyncClient
 from self_ping import self_ping
 from notifier import notify_price_changes
-from save_json import git_commit_and_push
+from save_json import start_git_worker, enqueue_git_push
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -456,7 +456,7 @@ def save_portfolio():
 
         with open("portfolio.json", "w", encoding="utf-8") as f:
             json.dump(portfolio, f, ensure_ascii=False, indent=2)
-        git_commit_and_push("Update portfolio.json")
+        enqueue_git_push("Update portfolio.json")
         print("✅ Портфель сохранён:", portfolio)
 
     except Exception as e:
@@ -523,7 +523,7 @@ def save_history():
     try:
         with open("history.json", "w", encoding="utf-8") as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
-        git_commit_and_push("Update history.json")
+        enqueue_git_push("Update portfolio.json")
     except Exception as e:
         print(f"Ошибка при сохранении истории: {e}")
 
@@ -1755,6 +1755,7 @@ async def main():
     load_history()
 
     print("📊 Загружаем исторические данные для SMA...")
+    start_git_worker()  # включаем фонового "гита"
 
     for ticker in TICKERS:
         try:
