@@ -250,81 +250,83 @@ async def notify_price_changes(application, TICKERS, portfolio, last_signal, CHA
 
 
     async def _fetch_one(ticker: str, name: str, in_portfolio: bool):
-    """
-    Быстро собрать всё нужное по одному тикеру (цена, лот, ликвидность, анализ).
-    Ничего не отправляет и не пишет — только считает и возвращает данные.
-    """
-    result = {
-        "ticker": ticker,
-        "name": name,
-        "price": None,
-        "lot_size": 1,
-        "avg_turn": None,
-        "avg_vol": None,
-        "signal_text": None,
-        "in_portfolio": in_portfolio,
-        "error": None,
-    }
-    try:
-        price = await get_moex_price_func(ticker)
-        if price is None:
-            raise ValueError("Нет текущей цены")
-        result["price"] = price
-        result["lot_size"] = lot_size_for(ticker)
-
-        if not in_portfolio:
-            try:
-                _, avg_vol, avg_turn = await get_liquidity_metrics(ticker, days=20)
-                result["avg_vol"] = avg_vol
-                result["avg_turn"] = avg_turn
-            except Exception:
-                result["avg_vol"] = 0.0
-                result["avg_turn"] = 0.0
-
-        # <-- вот здесь ограничиваем параллелизм анализа
-        async with _analysis_sem:
-            result["signal_text"] = await analyze_stock(ticker)
-
-    except Exception as e:
-        result["error"] = str(e)
-
-    return result
-
-    while True:
-        # 1) КОГО СКАНИРУЕМ: watchlist + (опционально) кандидаты
-        scan_items = list(TICKERS.items())
-        if SCAN_CANDIDATES:
-            cands = _load_candidates_dict()
-            for t, info in cands.items():
-                if t in portfolio or t in TICKERS:
-                    continue
-                nm = (info.get("name") or t)
-                scan_items.append((t, nm))
-
-        # 2) ПАРАЛЛЕЛЬНЫЙ СБОР ДАННЫХ (без отправки сообщений)
-        tasks = []
-        for ticker, name in scan_items:
-            tasks.append(_fetch_one(ticker, name, in_portfolio=(ticker in portfolio)))
-
-        results = await _bounded_gather(tasks)  # собираем пачками по PARALLEL_LIMIT
-
-        # 2.1) ПОСЛЕДОВАТЕЛЬНАЯ ОБРАБОТКА РЕЗУЛЬТАТОВ (отправки/запись/лимиты)
-        new_signals_sent = 0
-        for res in results:
-            if isinstance(res, Exception):
-                logger.error(f"Ошибка таска: {res}")
-                continue
-            if res.get("error"):
-                logger.error(f"Ошибка по {res['ticker']}: {res['error']}")
-                continue
-
-            ticker   = res["ticker"]
-            name     = res["name"]
-            price    = res["price"]
-            lot_size = res["lot_size"]
-            lot_price = price * lot_size
-            sig      = res["signal_text"]
-            in_pf    = res["in_portfolio"]
+        """
+        Быстро собрать всё нужное по одному тикеру (цена, лот, ликвидность, анализ).
+        Ничего не отправляет и не пишет — только считает и возвращает данные.
+        """
+        result = {
+            "ticker": ticker,
+            "name": name,
+            "price": None,
+            "lot_size": 1,
+            "avg_turn": None,
+            "avg_vol": None,
+            "signal_text": None,
+            "in_portfolio": in_portfolio,
+            "error": None,
+        }
+        try:
+            # цена и лот
+            price = await get_moex_price_func(ticker)
+            if price is None:
+                raise ValueError("Нет текущей цены")
+            result["price"] = price
+            result["lot_size"] = lot_size_for(ticker)
+    
+            # ликвидность — только для кандидатов (в портфеле не нужна)
+            if not in_portfolio:
+                try:
+                    _, avg_vol, avg_turn = await get_liquidity_metrics(ticker, days=20)
+                    result["avg_vol"] = avg_vol
+                    result["avg_turn"] = avg_turn
+                except Exception:
+                    result["avg_vol"] = 0.0
+                    result["avg_turn"] = 0.0
+    
+            # анализ ограничиваем отдельным семафором, чтобы не упереться в лимиты API
+            async with _analysis_sem:
+                result["signal_text"] = await analyze_stock(ticker)
+    
+        except Exception as e:
+            result["error"] = str(e)
+    
+        return result
+            
+                while True:
+                    # 1) КОГО СКАНИРУЕМ: watchlist + (опционально) кандидаты
+                    scan_items = list(TICKERS.items())
+                    if SCAN_CANDIDATES:
+                        cands = _load_candidates_dict()
+                        for t, info in cands.items():
+                            if t in portfolio or t in TICKERS:
+                                continue
+                            nm = (info.get("name") or t)
+                            scan_items.append((t, nm))
+            
+                    # 2) ПАРАЛЛЕЛЬНЫЙ СБОР ДАННЫХ (без отправки сообщений)
+                    tasks = []
+                    for ticker, name in scan_items:
+                        tasks.append(_fetch_one(ticker, name, in_portfolio=(ticker in portfolio)))
+            
+                    results = await _bounded_gather(tasks)  # собираем пачками по PARALLEL_LIMIT
+            
+                    # 2.1) ПОСЛЕДОВАТЕЛЬНАЯ ОБРАБОТКА РЕЗУЛЬТАТОВ (отправки/запись/лимиты)
+                    new_signals_sent = 0
+                    for res in results:
+                        if isinstance(res, Exception):
+                            logger.error(f"Ошибка таска: {res}")
+                            continue
+                        if res.get("error"):
+                            logger.error(f"Ошибка по {res['ticker']}: {res['error']}")
+                            continue
+            
+                        ticker   = res["ticker"]
+                        name     = res["name"]
+                        price    = res["price"]
+                        lot_size = res["lot_size"]
+                        lot_price = price * lot_size
+                        sig      = res["signal_text"]
+                        in_pf    = res["in_portfolio"]
 
             try:
                 if in_pf:
