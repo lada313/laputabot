@@ -21,6 +21,7 @@ from analysis import analyze_stock
 from tinkoff.invest import AsyncClient
 from self_ping import self_ping
 from notifier import notify_price_changes
+from save_json import git_commit_and_push
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -455,6 +456,7 @@ def save_portfolio():
 
         with open("portfolio.json", "w", encoding="utf-8") as f:
             json.dump(portfolio, f, ensure_ascii=False, indent=2)
+        git_commit_and_push("Update portfolio.json")
         print("✅ Портфель сохранён:", portfolio)
 
     except Exception as e:
@@ -518,11 +520,12 @@ def score_from_prices_local(prices: List[float]) -> float:
 
 
 def save_history():
-  try:
-      with open("history.json", "w", encoding="utf-8") as f:
-          json.dump(history, f, ensure_ascii=False, indent=2)
-  except Exception as e:
-      print(f"Ошибка при сохранении истории: {e}")
+    try:
+        with open("history.json", "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+        git_commit_and_push("Update history.json")
+    except Exception as e:
+        print(f"Ошибка при сохранении истории: {e}")
 
 def load_history():
   global history
