@@ -1951,8 +1951,14 @@ async def main():
     # Ежедневное автообновление в фоне
     asyncio.create_task(refresh_candidates_periodically(interval_hours=24))
     
-
-    # --- Запуск бота ---
+    try:
+        # отключаем вебхук и вычищаем очереди, чтобы polling был единственным источником
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook удалён (если был). Переходим на polling.")
+    except Exception as e:
+        logger.warning(f"Не удалось удалить webhook: {e}")
+        
+        # --- Запуск бота ---
     try:
         logger.info("Бот запускается...")
         await run_forever(application)
