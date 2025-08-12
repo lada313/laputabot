@@ -1,14 +1,15 @@
-# каждые 5 минут import requests
-import asyncio
-import requests
+# self_ping.py
+import asyncio, aiohttp, os
 
-URL = "https://e345b822-f985-4aad-b5e5-4c488fa48e5a-00-v9dvfd8b0rkm.worf.replit.dev/"
+URL = os.getenv("SELF_PING_URL", "https://laputabot.onrender.com/health")
 
 async def self_ping():
-    while True:
-        try:
-            response = requests.get(URL)
-            print(f"🔁 Самопинг: {response.status_code}")
-        except Exception as e:
-            print(f"❌ Ошибка самопинга: {e}")
-        await asyncio.sleep(300)  # каждые 5 минут
+    timeout = aiohttp.ClientTimeout(total=5)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        while True:
+            try:
+                async with session.get(URL) as r:
+                    print(f"🔁 Самопинг: {r.status}")
+            except Exception as e:
+                print(f"❌ Ошибка самопинга: {e}")
+            await asyncio.sleep(300)
