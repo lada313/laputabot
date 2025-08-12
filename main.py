@@ -2,7 +2,6 @@ import os, json
 import asyncio
 import aiohttp
 import logging
-import nest_asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram import Chat
 from tinkoff.invest import CandleInterval
@@ -33,6 +32,10 @@ TINKOFF_TOKEN = os.getenv("TINKOFF_TOKEN")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", "0"))
 
+# ---- Общий клиент Tinkoff и семафор на весь процесс ----
+TCS_CLIENT = None        # будет AsyncClient(...)
+TCS_SEM = None           # будет asyncio.Semaphore(...)
+
 TICKERS = {}
 portfolio = {}
 history = []
@@ -48,10 +51,6 @@ MAX_HISTORY_DAYS = 30
 TICKERS_FILE = "tickers.json"
 CANDIDATES_FILE = "candidates.json"
 OPEN_TRADES_FILE = "open_trades.json"
-
-
-# Инициализация nest_asyncio
-nest_asyncio.apply()
 
 async def safe_answer(query):
     try:
@@ -91,7 +90,8 @@ async def update_candidates_list_tinkoff() -> int:
     Формат файла: { "SBER": {"name": "Сбербанк", "lot": 10}, ... }
     """
     try:
-        async with AsyncClient(TINKOFF_TOKEN) as client:
+        client = TCS_CLIENT
+        async with TCS_SEM:
             shares = await client.instruments.shares()
     except Exception as e:
         logger.error(f"❌ Tinkoff API: не удалось получить акции: {e}")
@@ -204,7 +204,8 @@ async def update_candidates_list_moex() -> int:
 
     # 2) Фильтрация MOEX-списка по справочнику Tinkoff (не квал, можно купить, доступно через API, рубли, правильный класс)
     try:
-        async with AsyncClient(TINKOFF_TOKEN) as client:
+        client = TCS_CLIENT
+        async with TCS_SEM:
             shares = await client.instruments.shares()
     except Exception as e:
         logger.error(f"❌ Tinkoff API: не удалось получить акции для фильтра MOEX: {e}")
@@ -376,7 +377,8 @@ async def _moex_fetch_lot_size(ticker: str) -> Optional[int]:
 async def get_trade_price(ticker: str) -> float:
     t = ticker.upper()
     try:
-        async with AsyncClient(TINKOFF_TOKEN) as client:
+        client = TCS_CLIENT
+        async with TCS_SEM:
             shares = await client.instruments.shares()
             figi = next((getattr(s, "figi", None)
                          for s in shares.instruments
@@ -399,7 +401,8 @@ async def get_trade_price(ticker: str) -> float:
 
 async def _tinkoff_fetch_lot_size(ticker: str) -> Optional[int]:
     try:
-        async with AsyncClient(TINKOFF_TOKEN) as client:
+        client = TCS_CLIENT
+        async with TCS_SEM:
             shares = await client.instruments.shares()
         for s in shares.instruments:
             if (getattr(s, "ticker", "") or "").upper() == ticker.upper():
@@ -603,7 +606,8 @@ async def get_price(ticker: str) -> float:
 
     # 1) Tinkoff Invest (почти realtime)
     try:
-        async with AsyncClient(TINKOFF_TOKEN) as client:
+        client = TCS_CLIENT
+        async with TCS_SEM:
             shares = await client.instruments.shares()
             figi = None
             for s in shares.instruments:
@@ -831,7 +835,8 @@ async def load_history_any(ticker: str, days: int = 250) -> List[float]:
     try:
         frm = datetime.utcnow() - timedelta(days=days + 5)
         to = datetime.utcnow()
-        async with AsyncClient(TINKOFF_TOKEN) as client:
+        client = TCS_CLIENT
+        async with TCS_SEM:
             shares = await client.instruments.shares()
             figi = next((getattr(s, "figi", None)
                          for s in shares.instruments
@@ -887,14 +892,16 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     ])
 
 async def fetch_accounts():
-    async with AsyncClient(token=TINKOFF_TOKEN) as client:
+    client = TCS_CLIENT
+    async with TCS_SEM:
         accounts = await client.users.get_accounts()
         for account in accounts.accounts:
             print(f"ID: {account.id}, Type: {account.type}")
 async def check_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        async with AsyncClient(TINKOFF_TOKEN) as client:
-            accounts = await client.users.get_accounts()
+    client = TCS_CLIENT
+    async with TCS_SEM:
+        accounts = await client.users.get_accounts()
             await update.message.reply_text(f"✅ Tinkoff API доступен. Счетов: {len(accounts.accounts)}")
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка Tinkoff API: {str(e)}")
@@ -1771,7 +1778,8 @@ async def debug_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # tinkoff
     try:
-        async with AsyncClient(TINKOFF_TOKEN) as client:
+        client = TCS_CLIENT
+        async with TCS_SEM:
             shares = await client.instruments.shares()
             figi = next((getattr(s, "figi", None) for s in shares.instruments
                          if (getattr(s, "ticker", "") or "").upper() == t), None)
@@ -1859,6 +1867,12 @@ async def main():
 
     print("📊 Загружаем исторические данные для SMA...")
     start_git_worker()  # включаем фонового "гита"
+
+    # --- Инициализируем общий Tinkoff AsyncClient + семафор ---
+    global TCS_CLIENT, TCS_SEM
+    TCS_CLIENT = AsyncClient(TINKOFF_TOKEN)
+    await TCS_CLIENT.__aenter__()  # открываем один gRPC-канал на весь процесс
+    TCS_SEM = asyncio.Semaphore(int(os.getenv("TCS_CONCURRENCY", "4")))
 
     for ticker in TICKERS:
         try:
@@ -1969,6 +1983,12 @@ async def main():
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
     finally:
         logger.info("Бот завершает работу")
+                # Закрываем общий Tinkoff-клиент корректно
+        if TCS_CLIENT is not None:
+            try:
+                await TCS_CLIENT.__aexit__(None, None, None)
+            finally:
+                pass
         save_tickers()
         save_portfolio()
         save_history()
