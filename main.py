@@ -1864,7 +1864,7 @@ async def main():
     load_tickers()
     load_portfolio()
     load_history()
-
+    
     print("📊 Загружаем исторические данные для SMA...")
     start_git_worker()  # включаем фонового "гита"
 
@@ -1874,13 +1874,20 @@ async def main():
     await TCS_CLIENT.__aenter__()  # открываем один gRPC-канал на весь процесс
     TCS_SEM = asyncio.Semaphore(int(os.getenv("TCS_CONCURRENCY", "4")))
 
-    for ticker in TICKERS:
-        try:
-            prices = await load_moex_history(ticker, days=250)
-            price_history[ticker] = prices
-            print(f"✅ История загружена для {ticker}, дней: {len(prices)}")
-        except Exception as e:
-            print(f"❌ Не удалось загрузить историю для {ticker}: {e}")
+    # --- Фоновая предзагрузка истории, чтобы не блокировать старт бота ---
+    async def preload_history(tickers):
+        import logging
+        logging.getLogger(__name__).info("🚀 Фоновая предзагрузка истории: старт")
+        for ticker in tickers:
+            try:
+                prices = await load_moex_history(ticker, days=250)
+                price_history[ticker] = prices
+                print(f"✅ История загружена для {ticker}, дней: {len(prices)}")
+            except Exception as e:
+                print(f"❌ Не удалось загрузить историю для {ticker}: {e}")
+        logging.getLogger(__name__).info("🏁 Фоновая предзагрузка истории: завершена")
+
+    asyncio.create_task(preload_history(TICKERS))
 
     # Инициализация бота
     request = HTTPXRequest(
