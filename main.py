@@ -17,11 +17,11 @@ from telegram.request import HTTPXRequest
 import numpy as np
 from typing import List, Optional
 from keep_alive import keep_alive
-from analysis import analyze_stock
 from tinkoff.invest import AsyncClient
 from self_ping import self_ping
 from notifier import notify_price_changes
 from save_json import start_git_worker, enqueue_git_push
+from analysis import analyze_stock, build_portfolio_order_plan  # NEW
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -851,23 +851,23 @@ async def load_history_any(ticker: str, days: int = 250) -> List[float]:
         return []
 
 def calculate_rsi(prices: List[float], period: int = 14) -> Optional[float]:
-       if len(prices) < period + 1:
-           return None
-       deltas = np.diff(prices)
-       gains = np.where(deltas > 0, deltas, 0)
-       losses = np.where(deltas < 0, -deltas, 0)
-       avg_gain = np.mean(gains[:period])
-       avg_loss = np.mean(losses[:period])
-       for i in range(period, len(deltas)):
-           gain = gains[i]
-           loss = losses[i]
-           avg_gain = (avg_gain * (period - 1) + gain) / period
-           avg_loss = (avg_loss * (period - 1) + loss) / period
-       if avg_loss == 0:
-           return 100.0
-       rs = avg_gain / avg_loss
-       rsi = 100 - (100 / (1 + rs))
-       return round(rsi, 2)
+     if len(prices) < period + 1:
+         return None
+     deltas = np.diff(prices)
+     gains = np.where(deltas > 0, deltas, 0)
+     losses = np.where(deltas < 0, -deltas, 0)
+     avg_gain = np.mean(gains[:period])
+     avg_loss = np.mean(losses[:period])
+     for i in range(period, len(deltas)):
+         gain = gains[i]
+         loss = losses[i]
+         avg_gain = (avg_gain * (period - 1) + gain) / period
+         avg_loss = (avg_loss * (period - 1) + loss) / period
+     if avg_loss == 0:
+         return 100.0
+     rs = avg_gain / avg_loss
+     rsi = 100 - (100 / (1 + rs))
+     return round(rsi, 2)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -878,9 +878,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Портфель", callback_data="portfolio")],
+        [InlineKeyboardButton("Анализ портфеля (план заявок)", callback_data="portfolio_plan")],  # NEW
         [InlineKeyboardButton("Отслеживаемые акции", callback_data="watchlist")],
         [InlineKeyboardButton("История", callback_data="history")],
-        [InlineKeyboardButton("Сделки", callback_data="open_trades")],   # ← добавили
+        [InlineKeyboardButton("Сделки", callback_data="open_trades")],
         [InlineKeyboardButton("Добавить тикер", callback_data="add_ticker")],
         [InlineKeyboardButton("Инвестиционные идеи", callback_data="ideas_menu")]
     ])
@@ -1152,6 +1153,76 @@ async def get_portfolio_position_info(ticker: str, data: dict) -> dict:
             "current": 0.0
         }
 
+async def show_portfolio_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await safe_answer(query)
+
+    if not portfolio:
+        await query.edit_message_text("📭 Ваш портфель пуст.")
+        return
+
+    try:
+        # собираем параллельно цены и лоты
+        tasks = []
+        for ticker, data in portfolio.items():
+            tasks.append(get_trade_price(ticker))
+        prices = await asyncio.gather(*tasks, return_exceptions=True)
+
+        lines = ["🧭 *Анализ портфеля — план заявок*", ""]
+        kb_rows = []
+
+        for (ticker, data), px in zip(portfolio.items(), prices):
+            if isinstance(px, Exception) or px is None:
+                lines.append(f"• {ticker}: цена недоступна — пропускаю")
+                continue
+
+            lot_size = await get_lot_size(ticker)
+            qty_shares = int(data["amount"])
+            entry = float(data["price"])
+            plan = build_portfolio_order_plan(
+                ticker=ticker,
+                current_price=float(px),
+                entry_price=entry,
+                qty_shares=qty_shares,
+                lot_size=lot_size,
+            )
+
+            name = ticker  # если есть карта тикеров->имён — подставьте имя
+            lines.append(f"🔹 *{name}* ({ticker})")
+            lines.append(f"  Вход: {plan['entry']:.2f} ₽ | Текущая: {plan['current']:.2f} ₽")
+            lines.append(f"  Лот: {plan['lot_size']} | Объём: {plan['qty_shares']} акц. "
+                         f"(~{plan['qty_shares']//max(plan['lot_size'],1)} лот.)")
+            lines.append(f"  Рекомендации:")
+            # Выведем две «ветки» TP (единый и 50/50) и два стопа
+            # Для компактности — только ключевые строки, без дублей
+            tp_shown = set()
+            for leg in plan["legs"]:
+                if leg.kind == "take_profit":
+                    key = (leg.kind, leg.activation, leg.lots)
+                    if key in tp_shown:
+                        continue
+                    tp_shown.add(key)
+                price_note = f" → лимит {leg.limit:.2f} ₽" if leg.limit else ""
+                lines.append(
+                    f"    • {leg.what}: {leg.activation:.2f} ₽ · {leg.lots} лот(а){price_note}"
+                    + (f"  — {leg.note}" if leg.note else "")
+                )
+            lines.append("")  # пустая строка между бумагами
+
+            kb_rows.append([
+                InlineKeyboardButton("Открыть в Тинькофф", url=f"https://www.tinkoff.ru/invest/stocks/{ticker}")
+            ])
+
+        lines.append("_Подсказка по типам заявок указана выше в каждом пункте._")
+        kb_rows.append([InlineKeyboardButton("Назад", callback_data="main_menu")])
+        await query.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(kb_rows),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await query.edit_message_text(f"⚠️ Ошибка формирования плана: {e}")
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
   query = update.callback_query
   await safe_answer(query)
@@ -1235,6 +1306,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
   elif data == "main_menu":
     await query.edit_message_text("Главное меню:", reply_markup=main_menu_kb())
+
+  elif data == "portfolio_plan":
+     # на случай, если общий handler поймает раньше спец-хендлера
+    await show_portfolio_plan(update, context)
       
   elif data.startswith("ideas_"):
     budget = data.split("_")[1]
@@ -1304,6 +1379,34 @@ async def reset_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
            "SBER": "Сбербанк"
        }
        await query.edit_message_text("Данные портфеля и список тикеров очищены и сброшены к базовому набору.")
+
+async def daily_portfolio_plan_notifier(application, chat_id: int, hours: int = 24):
+    await asyncio.sleep(5)  # дать приложению подняться
+    while True:
+        try:
+            if portfolio:
+                # Сформируем простой текст без клавиатуры
+                tasks = [get_trade_price(t) for t in portfolio.keys()]
+                prices = await asyncio.gather(*tasks, return_exceptions=True)
+                lines = ["🗓️ Автообновление плана заявок (ежедневно)", ""]
+                for (ticker, data), px in zip(portfolio.items(), prices):
+                    if isinstance(px, Exception) or px is None:
+                        continue
+                    lot_size = await get_lot_size(ticker)
+                    plan = build_portfolio_order_plan(
+                        ticker=ticker,
+                        current_price=float(px),
+                        entry_price=float(data["price"]),
+                        qty_shares=int(data["amount"]),
+                        lot_size=lot_size,
+                    )
+                    lines.append(f"• {ticker}: TP2 {plan['tp2']:.2f} ₽ | SL {plan['sl']:.2f} ₽ "
+                                 f"({plan['qty_shares']//max(lot_size,1)} лот.)")
+                if len(lines) > 2:
+                    await application.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+        except Exception as e:
+            logger.error(f"daily_portfolio_plan_notifier: {e}")
+        await asyncio.sleep(hours * 3600)
 
 async def buy_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip().lower()
@@ -1804,6 +1907,7 @@ async def main():
     application.add_handler(CommandHandler("debug_price", debug_price))
     application.add_handler(CommandHandler("trades", trades_cmd))
     
+    application.add_handler(CallbackQueryHandler(show_portfolio_plan, pattern="^portfolio_plan$"))  # NEW
     print("✅ CallbackQueryHandler добавлен")
     application.add_handler(CallbackQueryHandler(button_handler, pattern="^(?!buy_).*"))
 
@@ -1823,10 +1927,10 @@ async def main():
 
     # --- Фоновая задача: уведомления ---
     asyncio.create_task(notify_price_changes(
-        application, TICKERS, portfolio, last_signal, CHAT_ID,
-        get_moex_price_func=get_price,   # было get_moex_price
-        calculate_rsi_func=calculate_rsi
-    ))
+        application, TICKERS, portfolio, last_signal, CHAT_ID, get_price, calculate_rsi,
+         lots_map=None, candidates_file=CANDIDATES_FILE
+     ))
+    asyncio.create_task(daily_portfolio_plan_notifier(application, CHAT_ID))  # NEW
 
     # --- Фоновая задача: самопинг ---
     asyncio.create_task(self_ping())
