@@ -895,16 +895,18 @@ async def fetch_accounts():
     client = TCS_CLIENT
     async with TCS_SEM:
         accounts = await client.users.get_accounts()
-        for account in accounts.accounts:
-            print(f"ID: {account.id}, Type: {account.type}")
+    for account in accounts.accounts:
+        print(f"ID: {account.id}, Type: {account.type}")
 async def check_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-    client = TCS_CLIENT
-    async with TCS_SEM:
-        accounts = await client.users.get_accounts()
-            await update.message.reply_text(f"✅ Tinkoff API доступен. Счетов: {len(accounts.accounts)}")
+        client = TCS_CLIENT
+        async with TCS_SEM:
+            accounts = await client.users.get_accounts()
+        await update.message.reply_text(
+            f"✅ Tinkoff API доступен. Счетов: {len(accounts.accounts)}"
+        )
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка Tinkoff API: {str(e)}")
+        await update.message.reply_text(f"❌ Ошибка Tinkoff API: {e}")
 
 
 async def fetch_price_and_analysis(ticker, name):
