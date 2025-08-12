@@ -266,6 +266,119 @@ async def analyze_stock(ticker: str, detailed: bool = False) -> str:
 async def _main():
     print(await analyze_stock("SBER", detailed=True))
 
+# === Order plan builder for portfolio ===
+from dataclasses import dataclass
+from math import floor
+
+@dataclass
+class PlanLeg:
+    kind: str           # "take_profit" | "stop_market" | "stop_limit"
+    what: str           # описание, чтобы печатать человеку
+    activation: float   # цена срабатывания
+    limit: float | None # для stop_limit
+    lots: int           # количество лотов
+    note: str | None = None  # ремарка
+
+def _lots_from_shares(qty_shares: int, lot_size: int) -> int:
+    return max(1, qty_shares // max(1, lot_size))
+
+def build_portfolio_order_plan(
+    *,
+    ticker: str,
+    current_price: float,
+    entry_price: float,
+    qty_shares: int,
+    lot_size: int,
+    tp1_pct: float = 0.05,    # +5%
+    tp2_pct: float = 0.10,    # +10%
+    sl_pct: float  = 0.03,    # -3%
+) -> dict:
+    """
+    Возвращает словарь с готовыми «ногами» плана:
+      - один из вариантов TP: либо один общий TP2, либо 50/50 TP1+TP2 (если лотов >= 2)
+      - стоп по выбору: stop-market или stop-limit (activation = SL, limit чуть ниже)
+    Все цены считаются от ЦЕНЫ ВХОДА (консервативный вариант).
+    """
+    lots_total = _lots_from_shares(qty_shares, lot_size)
+
+    tp1 = round(entry_price * (1 + tp1_pct), 2)
+    tp2 = round(entry_price * (1 + tp2_pct), 2)
+    sl  = round(entry_price * (1 - sl_pct),  2)
+
+    legs: list[PlanLeg] = []
+
+    # Вариант A: один общий тейк (всё по TP2)
+    legs.append(PlanLeg(
+        kind="take_profit",
+        what="Тейк-профит (весь объём)",
+        activation=tp2,
+        limit=None,
+        lots=lots_total,
+        note="Простой вариант — зафиксировать прибыль одним тейком."
+    ))
+
+    # Вариант B: частичная фиксация 50/50, если хватает лотов
+    if lots_total >= 2:
+        half = lots_total // 2
+        rest = lots_total - half
+        legs.append(PlanLeg(
+            kind="take_profit",
+            what=f"Тейк-профит #1 (≈50% объёма)",
+            activation=tp1,
+            limit=None,
+            lots=half,
+            note="Частичная фиксация на TP1."
+        ))
+        legs.append(PlanLeg(
+            kind="take_profit",
+            what=f"Тейк-профит #2 (остаток)",
+            activation=tp2,
+            limit=None,
+            lots=rest,
+            note="Досрочно можно перенести в безубыток после TP1."
+        ))
+
+    # Стопы: два варианта на выбор
+    # Stop-market — гарантированное срабатывание по рынку
+    legs.append(PlanLeg(
+        kind="stop_market",
+        what="Стоп-маркет (весь объём)",
+        activation=sl,
+        limit=None,
+        lots=lots_total,
+        note="Проще всего: сработает по рынку при касании активации."
+    ))
+
+    # Stop-limit — активация SL, лимит на 0.2% ниже, чтобы повысить шанс исполнения
+    sl_limit = round(sl * 0.998, 2)
+    legs.append(PlanLeg(
+        kind="stop_limit",
+        what="Стоп-лимит (весь объём)",
+        activation=sl,
+        limit=sl_limit,
+        lots=lots_total,
+        note="Более контролируемая цена: лимит чуть ниже активации (~0.2%)."
+    ))
+
+    return {
+        "ticker": ticker,
+        "entry": round(entry_price, 2),
+        "current": round(current_price, 2),
+        "lot_size": lot_size,
+        "qty_shares": qty_shares,
+        "tp1": tp1,
+        "tp2": tp2,
+        "sl": sl,
+        "legs": legs,
+        # Краткая подсказка по типам заявок Тинькофф
+        "help": (
+            "TP — обычная заявка Take-Profit по цене.\n"
+            "Stop-market — указываете только цену активации.\n"
+            "Stop-limit — указываете цену активации и лимит-цену.\n"
+            "Лимитная покупка на откате — можно выставлять вручную (живет ~13ч)."
+        ),
+    }
+
 # --- Liquidity helpers ---
 async def get_liquidity_metrics(ticker: str, days: int = 20) -> tuple[float, float, float]:
     """
