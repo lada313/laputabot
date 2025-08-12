@@ -1928,7 +1928,7 @@ async def main():
     # --- Фоновая задача: уведомления ---
     asyncio.create_task(notify_price_changes(
         application, TICKERS, portfolio, last_signal, CHAT_ID, get_price, calculate_rsi,
-         lots_map=None, candidates_file=CANDIDATES_FILE
+        lots_map=None, candidates_file=CANDIDATES_FILE
      ))
     asyncio.create_task(daily_portfolio_plan_notifier(application, CHAT_ID))  # NEW
 
@@ -1960,8 +1960,14 @@ async def main():
         
         # --- Запуск бота ---
     try:
-        logger.info("Бот запускается...")
-        await run_forever(application)
+         # На всякий случай: убрать возможный активный вебхук и старые апдейты,
+         # чтобы исключить конкуренцию getUpdates.
+         try:
+             await application.bot.delete_webhook(drop_pending_updates=True)
+         except Exception as _:
+             pass
+         logger.info("Бот запускается...")
+         await run_forever(application)
     except asyncio.CancelledError:
         logger.info("Бот остановлен по запросу")
     except Exception as e:
