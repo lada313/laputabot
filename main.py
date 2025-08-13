@@ -2,6 +2,7 @@ import os, json
 import asyncio
 import aiohttp
 import logging
+import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram import Chat
 from tinkoff.invest import CandleInterval
@@ -21,6 +22,8 @@ from self_ping import self_ping
 from notifier import notify_price_changes
 from save_json import start_git_worker, enqueue_git_push
 from analysis import analyze_stock, build_portfolio_order_plan  # NEW
+from grpc import StatusCode
+
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -32,6 +35,9 @@ TINKOFF_TOKEN = os.getenv("TINKOFF_TOKEN")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", "0"))
 
+_SHARES_CACHE = None
+_SHARES_CACHE_TS = 0.0
+_SHARES_TTL = 600  # 10 минут
 # Контекст клиента и сами сервисы
 TCS_CLIENT_CTX = None   # AsyncClient, только чтобы корректно закрыть соединение
 TCS = None              # AsyncServices: тут .instruments/.users/.market_data
@@ -73,7 +79,38 @@ async def safe_answer(query):
             logger.warning(f"Ignoring stale callback: {e}")
             return
         raise
+async def tcs_call_with_retry(coro_factory, *, attempts=4, base_delay=0.5):
+    """
+    coro_factory: lambda client: await client.<service>.<method>(...)
+    Ретраим на UNAVAILABLE/DEADLINE_EXCEEDED/INTERNAL.
+    """
+    last_exc = None
+    for i in range(attempts):
+        try:
+            client = TCS
+            async with TCS_SEM:
+                return await coro_factory(client)
+        except Exception as e:
+            code = getattr(e, "code", lambda: None)()
+            if code in (StatusCode.UNAVAILABLE, StatusCode.DEADLINE_EXCEEDED, StatusCode.INTERNAL):
+                delay = base_delay * (2 ** i)
+                logger.warning(f"TCS retry {i+1}/{attempts} after {code}: {e} (sleep {delay:.1f}s)")
+                await asyncio.sleep(delay)
+                last_exc = e
+                continue
+            raise
+    raise last_exc if last_exc else RuntimeError("TCS call failed")
 
+async def get_shares_cached(force: bool = False):
+    global _SHARES_CACHE, _SHARES_CACHE_TS
+    now = time.time()
+    if (not force) and _SHARES_CACHE is not None and (now - _SHARES_CACHE_TS) < _SHARES_TTL:
+        return _SHARES_CACHE
+    shares = await tcs_call_with_retry(lambda c: c.instruments.shares())
+    _SHARES_CACHE = shares
+    _SHARES_CACHE_TS = now
+    return shares
+    
 async def run_forever(app):
     backoff = 2
     while True:
@@ -110,7 +147,7 @@ async def update_candidates_list_tinkoff() -> int:
     try:
         client = TCS
         async with TCS_SEM:
-            shares = await client.instruments.shares()
+            shares = await get_shares_cached()
     except Exception as e:
         logger.error(f"❌ Tinkoff API: не удалось получить акции: {e}")
         return 0
@@ -224,7 +261,7 @@ async def update_candidates_list_moex() -> int:
     try:
         client = TCS
         async with TCS_SEM:
-            shares = await client.instruments.shares()
+            shares = await get_shares_cached()
     except Exception as e:
         logger.error(f"❌ Tinkoff API: не удалось получить акции для фильтра MOEX: {e}")
         return 0
@@ -397,19 +434,19 @@ async def get_trade_price(ticker: str) -> float:
     try:
         client = TCS
         async with TCS_SEM:
-            shares = await client.instruments.shares()
+            shares = await get_shares_cached()
             figi = next((getattr(s, "figi", None)
                          for s in shares.instruments
                          if (getattr(s, "ticker", "") or "").upper() == t), None)
             if figi:
                 try:
-                    ob = await client.market_data.get_order_book(figi=figi, depth=1)
+                    ob = await tcs_call_with_retry(lambda c: c.market_data.get_order_book(figi=figi, depth=1))
                     if ob.asks:
                         a = ob.asks[0].price
                         return float(a.units + a.nano * 1e-9)
                 except Exception:
                     pass
-                lp = await client.market_data.get_last_prices(figi=[figi])
+                lp = await tcs_call_with_retry(lambda c: c.market_data.get_last_prices(figi=[figi]))
                 if lp.last_prices:
                     p = lp.last_prices[0].price
                     return float(p.units + p.nano * 1e-9)
@@ -421,7 +458,7 @@ async def _tinkoff_fetch_lot_size(ticker: str) -> Optional[int]:
     try:
         client = TCS
         async with TCS_SEM:
-            shares = await client.instruments.shares()
+            shares = await get_shares_cached()
         for s in shares.instruments:
             if (getattr(s, "ticker", "") or "").upper() == ticker.upper():
                 lot = int(getattr(s, "lot", 1) or 1)
@@ -626,14 +663,14 @@ async def get_price(ticker: str) -> float:
     try:
         client = TCS
         async with TCS_SEM:
-            shares = await client.instruments.shares()
+            shares = await get_shares_cached()
             figi = None
             for s in shares.instruments:
                 if (getattr(s, "ticker", "") or "").upper() == t:
                     figi = getattr(s, "figi", None)
                     break
             if figi:
-                lp = await client.market_data.get_last_prices(figi=[figi])
+                lp = await tcs_call_with_retry(lambda c: c.market_data.get_last_prices(figi=[figi]))
                 if lp.last_prices:
                     p = lp.last_prices[0].price
                     return float(p.units + p.nano * 1e-9)
@@ -855,14 +892,14 @@ async def load_history_any(ticker: str, days: int = 250) -> List[float]:
         to = datetime.utcnow()
         client = TCS
         async with TCS_SEM:
-            shares = await client.instruments.shares()
+            shares = await get_shares_cached()
             figi = next((getattr(s, "figi", None)
                          for s in shares.instruments
                          if (getattr(s, "ticker", "") or "").upper() == ticker.upper()), None)
             if not figi:
                 return []
-            candles = await client.market_data.get_candles(
-                figi=figi, from_=frm, to=to, interval=CandleInterval.CANDLE_INTERVAL_DAY
+            candles = await tcs_call_with_retry(
+                lambda c: c.market_data.get_candles(figi=figi, from_=frm, to=to, interval=CandleInterval.CANDLE_INTERVAL_DAY)
             )
             closes = []
             for c in candles.candles:
@@ -911,14 +948,14 @@ def main_menu_kb() -> InlineKeyboardMarkup:
 async def fetch_accounts():
     client = TCS
     async with TCS_SEM:
-        accounts = await client.users.get_accounts()
+        accounts = await tcs_call_with_retry(lambda c: c.users.get_accounts())
     for account in accounts.accounts:
         print(f"ID: {account.id}, Type: {account.type}")
 async def check_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         client = TCS
         async with TCS_SEM:
-            accounts = await client.users.get_accounts()
+            accounts = await tcs_call_with_retry(lambda c: c.users.get_accounts())
         await update.message.reply_text(
             f"✅ Tinkoff API доступен. Счетов: {len(accounts.accounts)}"
         )
@@ -1983,7 +2020,7 @@ async def debug_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         client = TCS
         async with TCS_SEM:
-            shares = await client.instruments.shares()
+            shares = await get_shares_cached()
             figi = next((getattr(s, "figi", None) for s in shares.instruments
                          if (getattr(s, "ticker", "") or "").upper() == t), None)
             if figi:
