@@ -899,7 +899,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Портфель", callback_data="portfolio")],
-        [InlineKeyboardButton("Анализ портфеля (план заявок)", callback_data="portfolio_plan")],  # NEW
         [InlineKeyboardButton("Отслеживаемые акции", callback_data="watchlist")],
         [InlineKeyboardButton("История", callback_data="history")],
         [InlineKeyboardButton("Сделки", callback_data="open_trades")],
@@ -1086,11 +1085,16 @@ async def show_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📥 Инвестировано (по текущим позициям): {total_invested:.2f} ₽"
         )
 
-        keyboard.append([InlineKeyboardButton("Назад", callback_data="main_menu")])
+        # --- Добавляем общий план заявок ниже портфеля ---
+        plan_text, plan_kb = await render_portfolio_plan_text()
+        full_text = msg + "\n" + plan_text
 
+        # Склеим клавиатуры: кнопки позиций сюда не жмем (они строками), оставим только «Назад» и внешние ссылки из плана
+        # В plan_kb уже есть «Назад» + ссылки; используем её
         await query.edit_message_text(
-            msg,
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            full_text,
+            reply_markup=plan_kb,
+            parse_mode="Markdown"
         )
 
     except Exception as e:
@@ -1138,20 +1142,12 @@ async def get_portfolio_position_info(ticker: str, data: dict) -> dict:
 
         emoji = "🟢" if current_price > purchase_price else ("🔻" if current_price < purchase_price else "➖")
 
-        try:
-            analysis_text = await analyze_stock(ticker)
-            signal_line = (analysis_text or "").strip().split("\n")[0] or "⚠️ Анализ недоступен"
-        except Exception as e:
-            signal_line = "⚠️ Анализ недоступен"
-            logger.error(f"Ошибка анализа для {ticker}: {e}")
-
         message = (
             f"\n📌 {TICKERS.get(ticker, ticker)} ({ticker})\n"
             f"├ Цена покупки: {purchase_price:.2f} ₽\n"
             f"├ Текущая цена: {current_price:.2f} ₽ {emoji}\n"
             f"├ Количество: {amount_shares} шт (лот {lot_size})\n"
-            f"├ Прибыль/убыток: {profit_pct:+.2f}% ({profit_abs:+.2f} ₽)\n"
-            f"└ {signal_line}\n"
+            f"└ P/L: {profit_pct:+.2f}% ({profit_abs:+.2f} ₽)\n"
         )
 
         buttons = [
@@ -1177,6 +1173,62 @@ async def get_portfolio_position_info(ticker: str, data: dict) -> dict:
             "invested": 0.0,
             "current": 0.0
         }
+
+async def render_portfolio_plan_text() -> tuple[str, InlineKeyboardMarkup]:
+    """
+    Собирает компактный и наглядный план заявок по текущему портфелю.
+    Возвращает (text, keyboard).
+    """
+    if not portfolio:
+        return "📭 Портфель пуст — план недоступен.", InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="main_menu")]])
+
+    # Параллельно тянем цены
+    tasks = [get_trade_price(t) for t in portfolio.keys()]
+    prices = await asyncio.gather(*tasks, return_exceptions=True)
+
+    lines = ["", "🧭 *План заявок по портфелю*", ""]
+
+    kb_rows = []
+    for (ticker, data), px in zip(portfolio.items(), prices):
+        if isinstance(px, Exception) or px is None:
+            lines.append(f"• {ticker}: цена недоступна — пропуск")
+            continue
+
+        lot_size = await get_lot_size(ticker)
+        qty_shares = int(data["amount"])
+        entry = float(data["price"])
+        plan = build_portfolio_order_plan(
+            ticker=ticker,
+            current_price=float(px),
+            entry_price=entry,
+            qty_shares=qty_shares,
+            lot_size=lot_size,
+        )
+
+        # 🔹 Компактный, однообразный блок с четкими подзаголовками
+        lines.append(f"🔹 *{ticker}*  · вход {plan['entry']:.2f} ₽ · тек.{plan['current']:.2f} ₽")
+        lines.append(f"   Лот: {plan['lot_size']} · Объём: {plan['qty_shares']} акц. (~{plan['qty_shares']//max(plan['lot_size'],1)} лот.)")
+        # Сгруппируем «ноги» по типам, при этом уберём дублирующиеся TP с одинаковыми уровнями/лотами
+        tp_shown = set()
+        for leg in plan["legs"]:
+            if leg.kind == "take_profit":
+                key = (leg.activation, leg.lots)
+                if key in tp_shown:
+                    continue
+                tp_shown.add(key)
+                lines.append(f"   • TP: {leg.activation:.2f} ₽ · {leg.lots} лот(а)" + (f" → лимит {leg.limit:.2f} ₽" if leg.limit else ""))
+            elif leg.kind == "stop_loss":
+                lines.append(f"   • SL: {leg.activation:.2f} ₽" + (f" — {leg.note}" if leg.note else ""))
+            elif leg.kind == "trailing_stop":
+                lines.append(f"   • Трейлинг: {leg.activation:.2f} ₽" + (f" — {leg.note}" if leg.note else ""))
+        lines.append("")  # пустая строка между бумагами
+
+        kb_rows.append([InlineKeyboardButton("Открыть в Тинькофф", url=f"https://www.tinkoff.ru/invest/stocks/{ticker}")])
+
+    lines.append("_Примечание: уровни — ориентиры для лимит/стоп заявок._")
+    kb_rows.append([InlineKeyboardButton("Назад", callback_data="main_menu")])
+
+    return "\n".join(lines), InlineKeyboardMarkup(kb_rows)
 
 async def show_portfolio_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1943,9 +1995,8 @@ async def main():
     application.add_handler(CommandHandler("debug_price", debug_price))
     application.add_handler(CommandHandler("trades", trades_cmd))
     
-    application.add_handler(CallbackQueryHandler(show_portfolio_plan, pattern="^portfolio_plan$", block=True))
     print("✅ CallbackQueryHandler добавлен")
-    application.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(?!buy_|portfolio_plan$).*"))
+    application.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(?!buy_).*"))
 
 
 
