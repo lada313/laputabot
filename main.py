@@ -36,6 +36,8 @@ CHAT_ID = int(os.getenv("CHAT_ID", "0"))
 TCS_CLIENT_CTX = None   # AsyncClient, только чтобы корректно закрыть соединение
 TCS = None              # AsyncServices: тут .instruments/.users/.market_data
 TCS_SEM = None          # asyncio.Semaphore для ограничения параллелизма
+# Снэпшот последнего отправленного плана для сравнения
+LAST_PLAN_SNAPSHOT: dict[str, dict] = {}
 
 TICKERS = {}
 portfolio = {}
@@ -1230,6 +1232,87 @@ async def render_portfolio_plan_text() -> tuple[str, InlineKeyboardMarkup]:
 
     return "\n".join(lines), InlineKeyboardMarkup(kb_rows)
 
+def _arrow(old: float, new: float) -> str:
+    try:
+        if new > old: return "↑"
+        if new < old: return "↓"
+    except Exception:
+        pass
+    return "→"
+
+def _fmt_price(p: float) -> str:
+    return f"{p:.2f} ₽"
+
+def _extract_plan_snapshot(plan: dict) -> dict:
+    """
+    Оставляем только ключевые уровни для уведомлений:
+    - entry/current
+    - основной SL (минимальный stop_loss)
+    - основной TP (максимальный take_profit)
+    - трейлинг (True/False)
+    """
+    entry = float(plan["entry"])
+    current = float(plan["current"])
+
+    sls = [float(l.activation) for l in plan["legs"] if l.kind == "stop_loss"]
+    tps = [float(l.activation) for l in plan["legs"] if l.kind == "take_profit"]
+    trailing = any(l.kind == "trailing_stop" for l in plan["legs"])
+
+    return {
+        "entry": entry,
+        "current": current,
+        "sl": min(sls) if sls else None,
+        "tp": max(tps) if tps else None,
+        "trailing": trailing,
+        "lot_size": int(plan.get("lot_size", 1)),
+        "qty_shares": int(plan.get("qty_shares", 0)),
+    }
+
+def _diff_snap(old: dict | None, new: dict) -> list[str]:
+    """
+    Возвращает список строк-изменений для тикера.
+    Если изменений нет — пустой список.
+    """
+    changes = []
+    if not old:
+        # Первое появление — короткий резюме
+        base = [
+            f"вход {_fmt_price(new['entry'])}",
+            f"тек {_fmt_price(new['current'])}",
+        ]
+        if new.get("tp") is not None: base.append(f"TP {_fmt_price(new['tp'])}")
+        if new.get("sl") is not None: base.append(f"SL {_fmt_price(new['sl'])}")
+        if new.get("trailing"): base.append("Трейлинг: вкл")
+        changes.append(" · ".join(base))
+        return changes
+
+    # current (информативно, но отмечаем стрелкой)
+    if round(new["current"], 2) != round(old.get("current", new["current"]), 2):
+        changes.append(
+            f"Текущая: {_fmt_price(old['current'])} {_arrow(old['current'], new['current'])} {_fmt_price(new['current'])}"
+        )
+
+    # TP
+    if new.get("tp") is not None and round(new["tp"] or 0, 2) != round((old.get("tp") or 0), 2):
+        if old.get("tp") is None:
+            changes.append(f"TP: — → {_fmt_price(new['tp'])}")
+        else:
+            changes.append(f"TP: {_fmt_price(old['tp'])} {_arrow(old['tp'], new['tp'])} {_fmt_price(new['tp'])}")
+
+    # SL
+    if new.get("sl") is not None and round(new["sl"] or 0, 2) != round((old.get("sl") or 0), 2):
+        if old.get("sl") is None:
+            changes.append(f"SL: — → {_fmt_price(new['sl'])}")
+        else:
+            changes.append(f"SL: {_fmt_price(old['sl'])} {_arrow(old['sl'], new['sl'])} {_fmt_price(new['sl'])}")
+
+    # трейлинг
+    if bool(new.get("trailing")) != bool(old.get("trailing")):
+        changes.append(f"Трейлинг: {'вкл' if new['trailing'] else 'выкл'}")
+
+    return changes
+
+
 async def show_portfolio_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await safe_answer(query)
@@ -1455,32 +1538,85 @@ async def reset_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
        await query.edit_message_text("Данные портфеля и список тикеров очищены и сброшены к базовому набору.")
 
 async def daily_portfolio_plan_notifier(application, chat_id: int, hours: int = 24):
+    """
+    Ежедневный отчёт по изменениям плана: показываем ТОЛЬКО то, что изменилось
+    (TP/SL/трейлинг и текущая цена), с компактными стрелками.
+    """
+    global LAST_PLAN_SNAPSHOT
     await asyncio.sleep(5)  # дать приложению подняться
+    interval = max(1, int(hours)) * 3600
+
     while True:
         try:
-            if portfolio:
-                # Сформируем простой текст без клавиатуры
-                tasks = [get_trade_price(t) for t in portfolio.keys()]
-                prices = await asyncio.gather(*tasks, return_exceptions=True)
-                lines = ["🗓️ Автообновление плана заявок (ежедневно)", ""]
-                for (ticker, data), px in zip(portfolio.items(), prices):
-                    if isinstance(px, Exception) or px is None:
-                        continue
-                    lot_size = await get_lot_size(ticker)
-                    plan = build_portfolio_order_plan(
-                        ticker=ticker,
-                        current_price=float(px),
-                        entry_price=float(data["price"]),
-                        qty_shares=int(data["amount"]),
-                        lot_size=lot_size,
-                    )
-                    lines.append(f"• {ticker}: TP2 {plan['tp2']:.2f} ₽ | SL {plan['sl']:.2f} ₽ "
-                                 f"({plan['qty_shares']//max(lot_size,1)} лот.)")
-                if len(lines) > 2:
-                    await application.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+            if not portfolio:
+                await asyncio.sleep(interval)
+                continue
+
+            # Собираем актуальный снапшот
+            tasks = [get_trade_price(t) for t in portfolio.keys()]
+            prices = await asyncio.gather(*tasks, return_exceptions=True)
+
+            new_snapshot: dict[str, dict] = {}
+            lines: list[str] = ["🗓️ *Ежедневный отчёт по изменениям в плане заявок*", ""]
+
+            for (ticker, data), px in zip(portfolio.items(), prices):
+                if isinstance(px, Exception) or px is None:
+                    continue
+
+                lot_size = await get_lot_size(ticker)
+                plan = build_portfolio_order_plan(
+                    ticker=ticker,
+                    current_price=float(px),
+                    entry_price=float(data["price"]),
+                    qty_shares=int(data["amount"]),
+                    lot_size=lot_size,
+                )
+                snap = _extract_plan_snapshot(plan)
+                new_snapshot[ticker] = snap
+
+                old = LAST_PLAN_SNAPSHOT.get(ticker)
+                diffs = _diff_snap(old, snap)
+                if diffs:
+                    # Шапка бумаги
+                    header = f"🔹 *{ticker}* · вход {_fmt_price(snap['entry'])} · тек {_fmt_price(snap['current'])}"
+                    size_note = f" · объём {snap['qty_shares']} акц. (~{snap['qty_shares']//max(snap['lot_size'],1)} лот.)"
+                    lines.append(header + size_note)
+                    for d in diffs:
+                        lines.append(f"   • {d}")
+                    lines.append("")
+
+            # Если изменений нет — скажем явно
+            if len(lines) == 2:
+                lines.append("Без изменений по уровням. 👍")
+                lines.append("")
+
+            # Разбивка на части, если вдруг очень длинно (Telegram лимит ~4096)
+            text = "\n".join(lines)
+            if len(text) > 3500:
+                chunks = []
+                buf = []
+                curr = 0
+                for ln in lines:
+                    ln_len = len(ln) + 1
+                    if curr + ln_len > 3500 and buf:
+                        chunks.append("\n".join(buf))
+                        buf, curr = [], 0
+                    buf.append(ln); curr += ln_len
+                if buf:
+                    chunks.append("\n".join(buf))
+                for i, part in enumerate(chunks, 1):
+                    suffix = f" (стр. {i}/{len(chunks)})" if len(chunks) > 1 else ""
+                    await application.bot.send_message(chat_id=chat_id, text=part + suffix, parse_mode="Markdown")
+            else:
+                await application.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+
+            # Обновляем эталон для следующего сравнения
+            LAST_PLAN_SNAPSHOT = new_snapshot
+
         except Exception as e:
             logger.error(f"daily_portfolio_plan_notifier: {e}")
-        await asyncio.sleep(hours * 3600)
+
+        await asyncio.sleep(interval)
 
 async def buy_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip().lower()
