@@ -145,9 +145,7 @@ async def update_candidates_list_tinkoff() -> int:
     Формат файла: { "SBER": {"name": "Сбербанк", "lot": 10}, ... }
     """
     try:
-        client = TCS
-        async with TCS_SEM:
-            shares = await get_shares_cached()
+        shares = await get_shares_cached()
     except Exception as e:
         logger.error(f"❌ Tinkoff API: не удалось получить акции: {e}")
         return 0
@@ -257,18 +255,15 @@ async def update_candidates_list_moex() -> int:
         logger.warning("⚠️ MOEX: пустой список TQBR")
         return 0
 
-    # 2) Фильтрация MOEX-списка по справочнику Tinkoff (не квал, можно купить, доступно через API, рубли, правильный класс)
+    # 2) Фильтрация по справочнику Tinkoff
     try:
-        client = TCS
-        async with TCS_SEM:
-            shares = await get_shares_cached()
+        shares = await get_shares_cached()
     except Exception as e:
         logger.error(f"❌ Tinkoff API: не удалось получить акции для фильтра MOEX: {e}")
         return 0
 
     allowed_classes = {"TQBR", "TQTF", "TQTD"}
     filtered = {}
-    # Подготовим быстрый справочник по тикерам
     for s in shares.instruments:
         try:
             ticker = (getattr(s, "ticker", None) or "").strip()
@@ -310,7 +305,6 @@ async def update_candidates_list_moex() -> int:
     except Exception as e:
         logger.error(f"❌ Не удалось сохранить {CANDIDATES_FILE}: {e}")
         return 0
-
 
 async def update_candidates_list() -> int:
     """
@@ -432,8 +426,6 @@ async def _moex_fetch_lot_size(ticker: str) -> Optional[int]:
 async def get_trade_price(ticker: str) -> float:
     t = ticker.upper()
     try:
-        client = TCS
-        async with TCS_SEM:
             shares = await get_shares_cached()
             figi = next((getattr(s, "figi", None)
                          for s in shares.instruments
@@ -456,9 +448,7 @@ async def get_trade_price(ticker: str) -> float:
 
 async def _tinkoff_fetch_lot_size(ticker: str) -> Optional[int]:
     try:
-        client = TCS
-        async with TCS_SEM:
-            shares = await get_shares_cached()
+        shares = await get_shares_cached()
         for s in shares.instruments:
             if (getattr(s, "ticker", "") or "").upper() == ticker.upper():
                 lot = int(getattr(s, "lot", 1) or 1)
@@ -682,8 +672,6 @@ async def get_price(ticker: str) -> float:
 
     # 1) Tinkoff Invest (почти realtime)
     try:
-        client = TCS
-        async with TCS_SEM:
             shares = await get_shares_cached()
             figi = None
             for s in shares.instruments:
@@ -911,22 +899,22 @@ async def load_history_any(ticker: str, days: int = 250) -> List[float]:
     try:
         frm = datetime.utcnow() - timedelta(days=days + 5)
         to = datetime.utcnow()
-        client = TCS
-        async with TCS_SEM:
-            shares = await get_shares_cached()
-            figi = next((getattr(s, "figi", None)
-                         for s in shares.instruments
-                         if (getattr(s, "ticker", "") or "").upper() == ticker.upper()), None)
-            if not figi:
-                return []
-            candles = await tcs_call_with_retry(
-                lambda c: c.market_data.get_candles(figi=figi, from_=frm, to=to, interval=CandleInterval.CANDLE_INTERVAL_DAY)
+        shares = await get_shares_cached()
+        figi = next((getattr(s, "figi", None)
+                     for s in shares.instruments
+                     if (getattr(s, "ticker", "") or "").upper() == ticker.upper()), None)
+        if not figi:
+            return []
+        candles = await tcs_call_with_retry(
+            lambda c: c.market_data.get_candles(
+                figi=figi, from_=frm, to=to, interval=CandleInterval.CANDLE_INTERVAL_DAY
             )
-            closes = []
-            for c in candles.candles:
-                p = c.close
-                closes.append(float(p.units + p.nano * 1e-9))
-            return closes
+        )
+        closes = []
+        for c in candles.candles:
+            p = c.close
+            closes.append(float(p.units + p.nano * 1e-9))
+        return closes
     except Exception as e:
         logger.info(f"Tinkoff candles fail for {ticker}: {e}")
         return []
@@ -967,19 +955,13 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     ])
 
 async def fetch_accounts():
-    client = TCS
-    async with TCS_SEM:
-        accounts = await tcs_call_with_retry(lambda c: c.users.get_accounts())
+    accounts = await tcs_call_with_retry(lambda c: c.users.get_accounts())
     for account in accounts.accounts:
         print(f"ID: {account.id}, Type: {account.type}")
 async def check_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        client = TCS
-        async with TCS_SEM:
-            accounts = await tcs_call_with_retry(lambda c: c.users.get_accounts())
-        await update.message.reply_text(
-            f"✅ Tinkoff API доступен. Счетов: {len(accounts.accounts)}"
-        )
+        accounts = await tcs_call_with_retry(lambda c: c.users.get_accounts())
+        await update.message.reply_text(f"✅ Tinkoff API доступен. Счетов: {len(accounts.accounts)}")
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка Tinkoff API: {e}")
 
@@ -1074,7 +1056,6 @@ async def show_detailed_signals(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def get_moex_quote(ticker: str, board: str = "TQBR") -> dict:
     # вернёт: {"last": float|None, "bid": float|None, "ask": float|None}
-    import aiohttp
     url = (f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/"
            f"{board}/securities/{ticker}.json?iss.meta=off&iss.only=marketdata")
     async with aiohttp.ClientSession() as session:
@@ -1300,7 +1281,10 @@ async def render_portfolio_plan_text() -> tuple[str, InlineKeyboardMarkup]:
     Возвращает (text, keyboard).
     """
     if not portfolio:
-        return "📭 Портфель пуст — план недоступен.", InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="main_menu")]])
+        return (
+            "📭 Портфель пуст — план недоступен.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="main_menu")]])
+        )
 
     # Параллельно тянем цены
     tasks = [get_trade_price(t) for t in portfolio.keys()]
@@ -2099,16 +2083,14 @@ async def debug_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # tinkoff
     try:
-        client = TCS
-        async with TCS_SEM:
-            shares = await get_shares_cached()
-            figi = next((getattr(s, "figi", None) for s in shares.instruments
-                         if (getattr(s, "ticker", "") or "").upper() == t), None)
-            if figi:
-                lp = await client.market_data.get_last_prices(figi=[figi])
-                if lp.last_prices:
-                    p = lp.last_prices[0].price
-                    ti = float(p.units + p.nano * 1e-9)
+        shares = await get_shares_cached()
+        figi = next((getattr(s, "figi", None) for s in shares.instruments
+                     if (getattr(s, "ticker", "") or "").upper() == t), None)
+        if figi:
+            lp = await tcs_call_with_retry(lambda c: c.market_data.get_last_prices(figi=[figi]))
+            if lp.last_prices:
+                p = lp.last_prices[0].price
+                ti = float(p.units + p.nano * 1e-9)
     except Exception as e:
         logger.warning(f"/debug_price tinkoff {t}: {e}")
 
