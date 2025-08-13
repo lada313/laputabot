@@ -1347,70 +1347,112 @@ def _fmt_price(p: float) -> str:
 
 def _extract_plan_snapshot(plan: dict) -> dict:
     """
-    Оставляем только ключевые уровни для уведомлений:
+    Ключевые уровни для уведомлений:
     - entry/current
     - основной SL (минимальный stop_loss)
-    - основной TP (максимальный take_profit)
-    - трейлинг (True/False)
+    - до двух TP (минимальные по возрастанию) — tps: [tp1, tp2]
+    - трейлинг (факт наличия, без деталей)
+    - размеры позиции
     """
     entry = float(plan["entry"])
     current = float(plan["current"])
 
-    sls = [float(l.activation) for l in plan["legs"] if l.kind == "stop_loss"]
-    tps = [float(l.activation) for l in plan["legs"] if l.kind == "take_profit"]
+    sls = sorted(float(l.activation) for l in plan["legs"] if l.kind == "stop_loss")
+    tps_all = sorted(set(float(l.activation) for l in plan["legs"] if l.kind == "take_profit"))
+
     trailing = any(l.kind == "trailing_stop" for l in plan["legs"])
+
+    # Возьмём до двух нижних целей (ближайшие к цене) для TP1/TP2
+    tps = tps_all[:2]
 
     return {
         "entry": entry,
         "current": current,
-        "sl": min(sls) if sls else None,
-        "tp": max(tps) if tps else None,
+        "sl": sls[0] if sls else None,
+        "tps": tps,                # список из 0..2 значений
         "trailing": trailing,
         "lot_size": int(plan.get("lot_size", 1)),
         "qty_shares": int(plan.get("qty_shares", 0)),
     }
 
+# --- emoji helpers для отчёта ---
+def _status_emoji(entry: float, current: float) -> str:
+    """Зелёный если текущая >= входа, красный если ниже, нейтрально если равно."""
+    try:
+        if current > entry:
+            return "🟩"
+        if current < entry:
+            return "🟥"
+    except Exception:
+        pass
+    return "⬜"
+
+def _trend_emoji(old: float | None, new: float | None) -> str:
+    """Динамика текущей цены относительно вчерашней (или предыдущего снапшота)."""
+    try:
+        if old is None or round(old, 2) == round(new, 2):
+            return "➡️"
+        if new > old:
+            return "📈"
+        if new < old:
+            return "📉"
+    except Exception:
+        pass
+    return "➡️"
+
 def _diff_snap(old: dict | None, new: dict) -> list[str]:
     """
-    Возвращает список строк-изменений для тикера.
-    Если изменений нет — пустой список.
+    Возвращает список человекочитаемых строк-изменений для тикера.
+    Показываем только изменения: TP1/TP2, SL и текущую цену.
     """
-    changes = []
+    changes: list[str] = []
+
+    # Вспомогалки
+    def _fmt_change(prefix_emoji: str, title: str, ov: float | None, nv: float | None) -> str | None:
+        if ov is None and nv is not None:
+            return f"{prefix_emoji} **{title}**: — → {_fmt_price(nv)} — установлено"
+        if ov is not None and nv is None:
+            return f"{prefix_emoji} **{title}**: {_fmt_price(ov)} → — — снято"
+        if ov is not None and nv is not None and round(ov, 2) != round(nv, 2):
+            arrow = "↑" if nv > ov else "↓"
+            verb  = "повышена" if nv > ov else "понижена"
+            return f"{prefix_emoji} **{title}**: {_fmt_price(ov)} {arrow} {_fmt_price(nv)} — цель {verb}"
+        return None
+
+    # Если старого слепка не было — покажем короткое резюме по уровням
     if not old:
-        # Первое появление — короткий резюме
         base = [
-            f"вход {_fmt_price(new['entry'])}",
-            f"тек {_fmt_price(new['current'])}",
+            f"🎯 **Take Profit 1**: {_fmt_price(new['tps'][0])}" if len(new.get("tps", [])) >= 1 else None,
+            f"🎯 **Take Profit 2**: {_fmt_price(new['tps'][1])}" if len(new.get("tps", [])) >= 2 else None,
+            f"🛡️ **Stop Loss**: {_fmt_price(new['sl'])}" if new.get("sl") is not None else None,
         ]
-        if new.get("tp") is not None: base.append(f"TP {_fmt_price(new['tp'])}")
-        if new.get("sl") is not None: base.append(f"SL {_fmt_price(new['sl'])}")
-        if new.get("trailing"): base.append("Трейлинг: вкл")
-        changes.append(" · ".join(base))
+        # Текущую цену тоже отметим
+        base.append(f"📈 **Текущая цена**: {_fmt_price(new['current'])}")
+        changes.extend([b for b in base if b])
         return changes
 
-    # current (информативно, но отмечаем стрелкой)
-    if round(new["current"], 2) != round(old.get("current", new["current"]), 2):
-        changes.append(
-            f"Текущая: {_fmt_price(old['current'])} {_arrow(old['current'], new['current'])} {_fmt_price(new['current'])}"
-        )
+    # --- сравнение TP1/TP2 ---
+    old_tps = old.get("tps") or []
+    new_tps = new.get("tps") or []
+    old_tp1, old_tp2 = (old_tps + [None, None])[:2]
+    new_tp1, new_tp2 = (new_tps + [None, None])[:2]
 
-    # TP
-    if new.get("tp") is not None and round(new["tp"] or 0, 2) != round((old.get("tp") or 0), 2):
-        if old.get("tp") is None:
-            changes.append(f"TP: — → {_fmt_price(new['tp'])}")
-        else:
-            changes.append(f"TP: {_fmt_price(old['tp'])} {_arrow(old['tp'], new['tp'])} {_fmt_price(new['tp'])}")
+    s = _fmt_change("🎯", "Take Profit 1", old_tp1, new_tp1)
+    if s: changes.append(s)
+    s = _fmt_change("🎯", "Take Profit 2", old_tp2, new_tp2)
+    if s: changes.append(s)
 
-    # SL
-    if new.get("sl") is not None and round(new["sl"] or 0, 2) != round((old.get("sl") or 0), 2):
-        if old.get("sl") is None:
-            changes.append(f"SL: — → {_fmt_price(new['sl'])}")
-        else:
-            changes.append(f"SL: {_fmt_price(old['sl'])} {_arrow(old['sl'], new['sl'])} {_fmt_price(new['sl'])}")
+    # --- сравнение SL ---
+    s = _fmt_change("🛡️", "Stop Loss", old.get("sl"), new.get("sl"))
+    if s: changes.append(s)
 
-    # трейлинг
-    if bool(new.get("trailing")) != bool(old.get("trailing")):
-        changes.append(f"Трейлинг: {'вкл' if new['trailing'] else 'выкл'}")
+    # --- текущая цена (информативно) ---
+    oc = old.get("current")
+    nc = new.get("current")
+    if oc is None or round(oc, 2) != round(nc, 2):
+        arrow = "↑" if (oc is None or nc > oc) else ("↓" if nc < oc else "→")
+        trend = "выросла" if (oc is None or nc > oc) else ("упала" if nc < oc else "без изменений")
+        changes.append(f"📊 **Текущая цена**: {_fmt_price(oc) if oc is not None else '—'} {arrow} {_fmt_price(nc)} — цена {trend}")
 
     return changes
 
@@ -1641,11 +1683,13 @@ async def reset_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def daily_portfolio_plan_notifier(application, chat_id: int, hours: int = 24):
     """
-    Ежедневный отчёт по изменениям плана: показываем ТОЛЬКО то, что изменилось
-    (TP/SL/трейлинг и текущая цена), с компактными стрелками.
+    Ежедневный отчёт по изменениям плана:
+    - выводим ТОЛЬКО тикеры, где были изменения TP1/TP2, SL или текущей цены;
+    - шапка по тикеру в одну строку;
+    - затем: объём (🧾) и изменившиеся строки (🎯, 🛡️, 📊).
     """
     global LAST_PLAN_SNAPSHOT
-    await asyncio.sleep(5)  # дать приложению подняться
+    await asyncio.sleep(5)
     interval = max(1, int(hours)) * 3600
 
     while True:
@@ -1654,12 +1698,14 @@ async def daily_portfolio_plan_notifier(application, chat_id: int, hours: int = 
                 await asyncio.sleep(interval)
                 continue
 
-            # Собираем актуальный снапшот
+            # Собираем планы и снапшоты
             tasks = [get_trade_price(t) for t in portfolio.keys()]
             prices = await asyncio.gather(*tasks, return_exceptions=True)
 
             new_snapshot: dict[str, dict] = {}
-            lines: list[str] = ["🗓️ *Ежедневный отчёт по изменениям в плане заявок*", ""]
+            blocks: list[str] = ["🗓️ *Ежедневный отчёт по заявкам*", ""]
+
+            any_changes = False
 
             for (ticker, data), px in zip(portfolio.items(), prices):
                 if isinstance(px, Exception) or px is None:
@@ -1678,41 +1724,49 @@ async def daily_portfolio_plan_notifier(application, chat_id: int, hours: int = 
 
                 old = LAST_PLAN_SNAPSHOT.get(ticker)
                 diffs = _diff_snap(old, snap)
+
                 if diffs:
-                    # Шапка бумаги
-                    header = f"🔹 *{ticker}* · вход {_fmt_price(snap['entry'])} · тек {_fmt_price(snap['current'])}"
-                    size_note = f" · объём {snap['qty_shares']} акц. (~{snap['qty_shares']//max(snap['lot_size'],1)} лот.)"
-                    lines.append(header + size_note)
-                    for d in diffs:
-                        lines.append(f"   • {d}")
-                    lines.append("")
+                    any_changes = True
 
-            # Если изменений нет — скажем явно
-            if len(lines) == 2:
-                lines.append("Без изменений по уровням. 👍")
-                lines.append("")
+                    # Шапка тикера
+                    status = _status_emoji(snap["entry"], snap["current"])
+                    trend = _trend_emoji(old.get("current") if old else None, snap["current"])
+                    header = (f"🔹 *{ticker}* {status}{trend} · вход {_fmt_price(snap['entry'])} · "
+                              f"тек {_fmt_price(snap['current'])}")
+                    blocks.append(header)
 
-            # Разбивка на части, если вдруг очень длинно (Telegram лимит ~4096)
-            text = "\n".join(lines)
+                    # Строка объёма
+                    qty = snap["qty_shares"]; lot = max(1, snap["lot_size"])
+                    blocks.append(f"🧾 объём {qty} акц. · ~{qty // lot} лота · лот {lot}")
+
+                    # Изменения (TP1/TP2/SL/Текущая)
+                    blocks.extend(diffs)
+                    blocks.append("")  # пустая строка-разделитель
+
+            if not any_changes:
+                blocks.append("👍 Без изменений по уровням.")
+                blocks.append("")
+
+            text = "\n".join(blocks)
+
+            # отрезаем на куски если вдруг длинно
             if len(text) > 3500:
-                chunks = []
-                buf = []
-                curr = 0
+                lines = text.split("\n")
+                parts, buf, acc = [], [], 0
                 for ln in lines:
-                    ln_len = len(ln) + 1
-                    if curr + ln_len > 3500 and buf:
-                        chunks.append("\n".join(buf))
-                        buf, curr = [], 0
-                    buf.append(ln); curr += ln_len
+                    l = len(ln) + 1
+                    if acc + l > 3500 and buf:
+                        parts.append("\n".join(buf)); buf, acc = [], 0
+                    buf.append(ln); acc += l
                 if buf:
-                    chunks.append("\n".join(buf))
-                for i, part in enumerate(chunks, 1):
-                    suffix = f" (стр. {i}/{len(chunks)})" if len(chunks) > 1 else ""
+                    parts.append("\n".join(buf))
+                for i, part in enumerate(parts, 1):
+                    suffix = f" (стр. {i}/{len(parts)})" if len(parts) > 1 else ""
                     await application.bot.send_message(chat_id=chat_id, text=part + suffix, parse_mode="Markdown")
             else:
                 await application.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
 
-            # Обновляем эталон для следующего сравнения
+            # Обновляем baseline
             LAST_PLAN_SNAPSHOT = new_snapshot
 
         except Exception as e:
