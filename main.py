@@ -585,6 +585,27 @@ def save_history():
     except Exception as e:
         print(f"Ошибка при сохранении истории: {e}")
 
+# ---------- helpers для визуализации портфеля ----------
+def _fmt_money(v: float) -> str:
+    return f"{v:,.2f} ₽".replace(",", " ")  # тонкий пробел для разрядов
+
+def _fmt_pct(v: float) -> str:
+    sign = "+" if v > 0 else ""
+    return f"{sign}{v:.2f}%"
+
+def _pad(s: str, width: int) -> str:
+    # выравнивание колонок в моноширинном блоке
+    return s[:width].ljust(width)
+
+def _arrow_vs_current(level: float, current: float) -> str:
+    # стрелка относительно текущей цены
+    try:
+        if level > current: return "↑"
+        if level < current: return "↓"
+    except Exception:
+        pass
+    return "→"
+
 def load_history():
   global history
   try:
@@ -1083,7 +1104,7 @@ async def get_moex_quote(ticker: str, board: str = "TQBR") -> dict:
     }
 
 async def show_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отображает текущий портфель с детализацией по каждой позиции и итогами (позиции и история)"""
+    """Показывает портфель: таблица позиций + план заявок (новый рендер)."""
     query = update.callback_query
     await safe_answer(query)
 
@@ -1092,54 +1113,13 @@ async def show_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        msg = "📊 Ваш портфель:\n"
-        keyboard = []
-        tasks = []
-
-        for ticker, data in portfolio.items():
-            tasks.append(get_portfolio_position_info(ticker, data))
-
-        position_infos = await asyncio.gather(*tasks, return_exceptions=True)
-
-        total_invested = 0.0   # по текущим позициям (avg price × кол-во акций)
-        total_current = 0.0    # рыночная стоимость позиций сейчас
-
-        for info in position_infos:
-            if isinstance(info, Exception):
-                logger.error(f"Ошибка позиции: {info}")
-                continue
-
-            msg += info.get("message", "")
-            keyboard.append(info.get("buttons", []))
-            total_invested += float(info.get("invested", 0.0))
-            total_current  += float(info.get("current", 0.0))
-
-        total_profit = total_current - total_invested
-        total_profit_pct = (total_profit / total_invested * 100) if total_invested > 0 else 0.0
-
-        msg += (
-            "\n"
-            f"💰 Общий результат: {total_profit:+.2f} ₽ ({total_profit_pct:+.2f}%)\n"
-            f"📦 Текущая стоимость (по рынку): {total_current:.2f} ₽\n"
-            f"📥 Инвестировано (по текущим позициям): {total_invested:.2f} ₽"
-        )
-
-        # --- Добавляем общий план заявок ниже портфеля ---
-        plan_text, plan_kb = await render_portfolio_plan_text()
-        full_text = msg + "\n" + plan_text
-
-        # Склеим клавиатуры: кнопки позиций сюда не жмем (они строками), оставим только «Назад» и внешние ссылки из плана
-        # В plan_kb уже есть «Назад» + ссылки; используем её
-        await query.edit_message_text(
-            full_text,
-            reply_markup=plan_kb,
-            parse_mode="Markdown"
-        )
-
+        # Новый единый рендер без старой сборки msg/keyboard
+        text, kb = await render_portfolio_v2()
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Критическая ошибка в show_portfolio: {e}")
         await query.edit_message_text("⚠️ Произошла ошибка при загрузке портфеля. Попробуйте позже.")
-
+        
 def calc_history_invested() -> float:
     """Сумма всех покупок из history (action == 'buy'). Игнорирует продажи и 'n/a'."""
     total = 0.0
@@ -1212,6 +1192,107 @@ async def get_portfolio_position_info(ticker: str, data: dict) -> dict:
             "invested": 0.0,
             "current": 0.0
         }
+
+async def render_portfolio_v2() -> tuple[str, InlineKeyboardMarkup]:
+    # --- 1) Таблица позиций ---
+    lines = []
+    lines.append("📊 Портфель\n")
+    header = f"╔ {_pad('Тикер',6)} {_pad('Кол-во',6)} {_pad('Вход',8)} {_pad('Текущая',8)} {_pad('P/L, %',7)} {_pad('P/L, ₽',10)}"
+    lines.append("```")
+    lines.append(header)
+
+    total_invested = 0.0
+    total_current = 0.0
+    rowlines = []
+
+    tasks = [get_trade_price(t) for t in portfolio.keys()]
+    prices = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for (ticker, data), px in zip(portfolio.items(), prices):
+        curr = 0.0 if isinstance(px, Exception) or px is None else float(px)
+        qty   = int(data["amount"])
+        entry = float(data["price"])
+
+        invested = entry * qty
+        current  = curr * qty
+        pl_abs   = current - invested
+        pl_pct   = ((curr - entry) / entry * 100) if entry > 0 else 0.0
+
+        total_invested += invested
+        total_current  += current
+
+        row = (
+            f"║ {_pad(ticker,6)} "
+            f"{_pad(str(qty),6)} "
+            f"{_pad(f'{entry:.2f}',8)} "
+            f"{_pad(f'{curr:.2f}',8)} "
+            f"{_pad(_fmt_pct(pl_pct),7)} "
+            f"{_pad(f'{pl_abs:,.2f}'.replace(',', ' '),10)}"
+        )
+        rowlines.append(row)
+
+    lines.extend(rowlines)
+    lines.append("╚ " + "Итого:".ljust(6))
+    lines.append(f"  Текущая стоимость:  {'—'*6}  {_fmt_money(total_current)}")
+    lines.append(f"  Инвестировано:      {'—'*6}  {_fmt_money(total_invested)}")
+    total_pl_abs = total_current - total_invested
+    total_pl_pct = (total_pl_abs / total_invested * 100) if total_invested > 0 else 0.0
+    lines.append(f"  Результат:          {_fmt_pct(total_pl_pct)}  {_fmt_money(total_pl_abs)}")
+    lines.append("```")
+    lines.append("")
+
+    # --- 2) План заявок (стрелки и “подвижный стоп”) ---
+    lines.append("🧭 *План заявок*\n")
+    kb_rows = []
+
+    for (ticker, data), px in zip(portfolio.items(), prices):
+        if isinstance(px, Exception) or px is None:
+            continue
+
+        curr = float(px)
+        lot_size = await get_lot_size(ticker)
+        qty = int(data["amount"])
+        plan = build_portfolio_order_plan(
+            ticker=ticker,
+            current_price=curr,
+            entry_price=float(data["price"]),
+            qty_shares=qty,
+            lot_size=lot_size,
+        )
+
+        lines.append(
+            f"*{ticker}* · вход {plan['entry']:.2f} ₽ · тек {plan['current']:.2f} ₽ · "
+            f"объём {qty} акц. (~{qty//max(lot_size,1)} лот.)"
+        )
+
+        tp_seen = set()
+        for leg in plan["legs"]:
+            if leg.kind == "take_profit":
+                key = (round(leg.activation, 2), int(leg.lots))
+                if key in tp_seen:
+                    continue
+                tp_seen.add(key)
+                arw = _arrow_vs_current(leg.activation, curr)
+                lim = f" → лимит {leg.limit:.2f} ₽" if leg.limit else ""
+                lines.append(f"• {arw} TP: {leg.activation:.2f} ₽ · {leg.lots} лот(а){lim}")
+            elif leg.kind == "stop_loss":
+                arw = _arrow_vs_current(leg.activation, curr)
+                note = f" — {leg.note}" if leg.note else ""
+                lines.append(f"• {arw} SL: {leg.activation:.2f} ₽{note}")
+            elif leg.kind == "trailing_stop":
+                # пояснение: (подвижный стоп) + стрелка вверх
+                note = f" — {leg.note}" if leg.note else ""
+                lines.append(f"• ⬆️ Трейлинг: {leg.activation:.2f} ₽ (подвижный стоп){note}")
+
+        lines.append("")  # разделитель между бумагами
+        kb_rows.append([
+            InlineKeyboardButton(f"Открыть {ticker}", url=f"https://www.tinkoff.ru/invest/stocks/{ticker}")
+        ])
+
+    lines.append("_TP — тейк-профит, SL — стоп-лосс, трейлинг — подвижный стоп._")
+    kb_rows.append([InlineKeyboardButton("Назад", callback_data="main_menu")])
+
+    return "\n".join(lines), InlineKeyboardMarkup(kb_rows)
 
 async def render_portfolio_plan_text() -> tuple[str, InlineKeyboardMarkup]:
     """
