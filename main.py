@@ -53,6 +53,15 @@ TICKERS_FILE = "tickers.json"
 CANDIDATES_FILE = "candidates.json"
 OPEN_TRADES_FILE = "open_trades.json"
 
+async def safe_edit_message(query, text, reply_markup=None, parse_mode=None):
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except BadRequest as e:
+        if "message is not modified" in str(e).lower():
+            logger.info("Skipped edit: message is not modified")
+        else:
+            raise
+
 async def safe_answer(query):
     try:
         await query.answer()
@@ -1174,7 +1183,7 @@ async def show_portfolio_plan(update: Update, context: ContextTypes.DEFAULT_TYPE
     await safe_answer(query)
 
     if not portfolio:
-        await query.edit_message_text("📭 Ваш портфель пуст.")
+        await safe_edit_message(query, "📭 Ваш портфель пуст.")
         return
 
     try:
@@ -1231,7 +1240,8 @@ async def show_portfolio_plan(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         lines.append("_Подсказка по типам заявок указана выше в каждом пункте._")
         kb_rows.append([InlineKeyboardButton("Назад", callback_data="main_menu")])
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             "\n".join(lines),
             reply_markup=InlineKeyboardMarkup(kb_rows),
             parse_mode="Markdown"
@@ -1322,10 +1332,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
   elif data == "main_menu":
     await query.edit_message_text("Главное меню:", reply_markup=main_menu_kb())
-
-  elif data == "portfolio_plan":
-     # на случай, если общий handler поймает раньше спец-хендлера
-    await show_portfolio_plan(update, context)
       
   elif data.startswith("ideas_"):
     budget = data.split("_")[1]
@@ -1937,9 +1943,9 @@ async def main():
     application.add_handler(CommandHandler("debug_price", debug_price))
     application.add_handler(CommandHandler("trades", trades_cmd))
     
-    application.add_handler(CallbackQueryHandler(show_portfolio_plan, pattern="^portfolio_plan$"))  # NEW
+    application.add_handler(CallbackQueryHandler(show_portfolio_plan, pattern="^portfolio_plan$", block=True))
     print("✅ CallbackQueryHandler добавлен")
-    application.add_handler(CallbackQueryHandler(button_handler, pattern="^(?!buy_).*"))
+    application.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(?!buy_|portfolio_plan$).*"))
 
 
 
