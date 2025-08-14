@@ -8,7 +8,7 @@
     "sl": 633.022,
     "lot_size": 1,
     "qty": 5,
-    "status": "open",
+    "status": "closed",
     "trail_active": false,
     "trail_anchor": 652.6,
     "trail_sl": 633.022,
