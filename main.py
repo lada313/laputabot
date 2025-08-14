@@ -1175,24 +1175,25 @@ async def get_portfolio_position_info(ticker: str, data: dict) -> dict:
         }
 
 async def render_portfolio_v2() -> tuple[str, InlineKeyboardMarkup]:
-    # --- 1) Таблица позиций ---
-    lines = []
-    lines.append("📊 Портфель\n")
-    header = f"╔ {_pad('Тикер',6)} {_pad('Кол-во',6)} {_pad('Вход',8)} {_pad('Текущая',8)} {_pad('P/L, %',7)} {_pad('P/L, ₽',10)}"
-    lines.append("```")
-    lines.append(header)
+    lines: list[str] = []
 
-    total_invested = 0.0
-    total_current = 0.0
-    rowlines = []
+    # ===== 1) Состав портфеля (в стиле дневного отчёта, без монотаблицы) =====
+    lines.append("📊 *Портфель*")
+    if not portfolio:
+        return "📭 Портфель пуст.", InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="main_menu")]])
+    lines.append("")
 
     tasks = [get_trade_price(t) for t in portfolio.keys()]
     prices = await asyncio.gather(*tasks, return_exceptions=True)
 
+    total_invested = 0.0
+    total_current  = 0.0
+
+    lines.append("📦 *Состав портфеля*")
     for (ticker, data), px in zip(portfolio.items(), prices):
-        curr = 0.0 if isinstance(px, Exception) or px is None else float(px)
         qty   = int(data["amount"])
         entry = float(data["price"])
+        curr  = 0.0 if isinstance(px, Exception) or px is None else float(px)
 
         invested = entry * qty
         current  = curr * qty
@@ -1202,75 +1203,101 @@ async def render_portfolio_v2() -> tuple[str, InlineKeyboardMarkup]:
         total_invested += invested
         total_current  += current
 
-        row = (
-            f"║ {_pad(ticker,6)} "
-            f"{_pad(str(qty),6)} "
-            f"{_pad(f'{entry:.2f}',8)} "
-            f"{_pad(f'{curr:.2f}',8)} "
-            f"{_pad(_fmt_pct(pl_pct),7)} "
-            f"{_pad(f'{pl_abs:,.2f}'.replace(',', ' '),10)}"
-        )
-        rowlines.append(row)
+        mood = "📈" if pl_abs > 0 else ("📉" if pl_abs < 0 else "➖")
+        # 1-я строка — краткая шапка бумаги
+        lines.append(f"🔹 *{ticker}* — вход {entry:.2f} ₽ · тек {curr:.2f} ₽")
+        # 2-я строка — объем и P/L
+        lines.append(f"   🧾 объём {qty} акц. · P/L {pl_pct:+.2f}% ({pl_abs:+.2f} ₽) {mood}")
+        lines.append("")
 
-    lines.extend(rowlines)
-    lines.append("╚ " + "Итого:".ljust(6))
-    lines.append(f"  Текущая стоимость:  {'—'*6}  {_fmt_money(total_current)}")
-    lines.append(f"  Инвестировано:      {'—'*6}  {_fmt_money(total_invested)}")
+    # Итоги по портфелю
     total_pl_abs = total_current - total_invested
     total_pl_pct = (total_pl_abs / total_invested * 100) if total_invested > 0 else 0.0
-    lines.append(f"  Результат:          {_fmt_pct(total_pl_pct)}  {_fmt_money(total_pl_abs)}")
-    lines.append("```")
+    lines.append("💰 *Итоги*")
+    lines.append(f"   Текущая стоимость: {_fmt_money(total_current)}")
+    lines.append(f"   Инвестировано:     {_fmt_money(total_invested)}")
+    lines.append(f"   Результат:         {_fmt_pct(total_pl_pct)} · {_fmt_money(total_pl_abs)}")
     lines.append("")
 
-    # --- 2) План заявок (стрелки и “подвижный стоп”) ---
-    lines.append("🧭 *План заявок*\n")
-    kb_rows = []
+    # ===== 2) План заявок (как в ежедневном отчёте) =====
+    lines.append("🧭 *План заявок*")
+    lines.append("")
+
+    kb_rows: list[list[InlineKeyboardButton]] = []
 
     for (ticker, data), px in zip(portfolio.items(), prices):
         if isinstance(px, Exception) or px is None:
+            lines.append(f"• *{ticker}*: цена недоступна — пропуск")
+            lines.append("")
             continue
 
-        curr = float(px)
+        curr     = float(px)
+        entry    = float(data["price"])
+        qty      = int(data["amount"])
         lot_size = await get_lot_size(ticker)
-        qty = int(data["amount"])
+
         plan = build_portfolio_order_plan(
             ticker=ticker,
             current_price=curr,
-            entry_price=float(data["price"]),
+            entry_price=entry,
             qty_shares=qty,
             lot_size=lot_size,
         )
 
-        lines.append(
-            f"*{ticker}* · вход {plan['entry']:.2f} ₽ · тек {plan['current']:.2f} ₽ · "
-            f"объём {qty} акц. (~{qty//max(lot_size,1)} лот.)"
-        )
+        # Шапка бумаги
+        lines.append(f"*{ticker}* — вход {plan['entry']:.2f} ₽ · тек {plan['current']:.2f} ₽")
+        lines.append(f"🧾 объём {qty} акц. · ~{qty//max(lot_size,1)} лота · лот {lot_size}")
 
-        tp_seen = set()
+        # Собираем уровни
+        tp_levels, sl_levels, tr_levels = [], [], []
         for leg in plan["legs"]:
             if leg.kind == "take_profit":
-                key = (round(leg.activation, 2), int(leg.lots))
-                if key in tp_seen:
-                    continue
-                tp_seen.add(key)
-                arw = _arrow_vs_current(leg.activation, curr)
-                lim = f" → лимит {leg.limit:.2f} ₽" if leg.limit else ""
-                lines.append(f"• {arw} TP: {leg.activation:.2f} ₽ · {leg.lots} лот(а){lim}")
+                tp_levels.append((float(leg.activation), int(leg.lots), float(leg.limit) if leg.limit else None))
             elif leg.kind == "stop_loss":
-                arw = _arrow_vs_current(leg.activation, curr)
-                note = f" — {leg.note}" if leg.note else ""
-                lines.append(f"• {arw} SL: {leg.activation:.2f} ₽{note}")
+                sl_levels.append(float(leg.activation))
             elif leg.kind == "trailing_stop":
-                # пояснение: (подвижный стоп) + стрелка вверх
-                note = f" — {leg.note}" if leg.note else ""
-                lines.append(f"• ⬆️ Трейлинг: {leg.activation:.2f} ₽ (подвижный стоп){note}")
+                tr_levels.append(float(leg.activation))
 
-        lines.append("")  # разделитель между бумагами
-        kb_rows.append([
-            InlineKeyboardButton(f"Открыть {ticker}", url=f"https://www.tinkoff.ru/invest/stocks/{ticker}")
-        ])
+        # Уникальные TP, отсортированные по цене
+        seen = set()
+        uniq_tp = []
+        for a, l, lim in sorted(tp_levels, key=lambda x: x[0]):
+            key = (round(a, 2), l, round(lim or 0.0, 2))
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq_tp.append((a, l, lim))
 
-    lines.append("_TP — тейк-профит, SL — стоп-лосс, трейлинг — подвижный стоп._")
+        # Выводим TP1 и TP2
+        if uniq_tp:
+            a, l, lim = uniq_tp[0]
+            arw = _arrow_vs_current(a, curr)
+            lim_txt = f" → лимит {lim:.2f} ₽" if lim else ""
+            lines.append(f"🎯 *TP1*: {a:.2f} ₽ · {l} лот(а) {arw}{lim_txt}")
+        if len(uniq_tp) > 1:
+            a, l, lim = uniq_tp[1]
+            arw = _arrow_vs_current(a, curr)
+            lim_txt = f" → лимит {lim:.2f} ₽" if lim else ""
+            lines.append(f"🎯 *TP2*: {a:.2f} ₽ · {l} лот(а) {arw}{lim_txt}")
+        if len(uniq_tp) > 2:
+            lines.append(f"➕ ещё {len(uniq_tp) - 2} TP уровн.")
+
+        # Актуальный SL (минимальный из доступных)
+        if sl_levels:
+            sl_cur = min(sl_levels)
+            arw = _arrow_vs_current(sl_cur, curr)
+            lines.append(f"🛡️ *SL (актуальный)*: {sl_cur:.2f} ₽ {arw}")
+
+        # Трейлинг — кратко, с пояснением
+        if tr_levels:
+            base = min(tr_levels)
+            lines.append(f"📍 *Трейлинг*: {base:.2f} ₽ (подвижный стоп)")
+
+        lines.append("")
+        kb_rows.append([InlineKeyboardButton(f"Открыть {ticker}", url=f"https://www.tinkoff.ru/invest/stocks/{ticker}")])
+
+    # Легенда и «Назад»
+    lines.append("ℹ️ Обозначения: 🎯 тейк-профит · 🛡️ стоп-лосс · 📍 трейлинг (подвижный стоп) · 📈/📉 результат по позиции.")
     kb_rows.append([InlineKeyboardButton("Назад", callback_data="main_menu")])
 
     return "\n".join(lines), InlineKeyboardMarkup(kb_rows)
@@ -1684,9 +1711,8 @@ async def reset_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def daily_portfolio_plan_notifier(application, chat_id: int, hours: int = 24):
     """
     Ежедневный отчёт по изменениям плана:
-    - выводим ТОЛЬКО тикеры, где были изменения TP1/TP2, SL или текущей цены;
-    - шапка по тикеру в одну строку;
-    - затем: объём (🧾) и изменившиеся строки (🎯, 🛡️, 📊).
+    - показываем базовые уровни (TP1/TP2/SL) для каждого тикера ВСЕГДА;
+    - ниже — только изменения (TP1/TP2/SL/текущая цена) со стрелками и пояснениями.
     """
     global LAST_PLAN_SNAPSHOT
     await asyncio.sleep(5)
@@ -1698,14 +1724,13 @@ async def daily_portfolio_plan_notifier(application, chat_id: int, hours: int = 
                 await asyncio.sleep(interval)
                 continue
 
-            # Собираем планы и снапшоты
             tasks = [get_trade_price(t) for t in portfolio.keys()]
             prices = await asyncio.gather(*tasks, return_exceptions=True)
 
             new_snapshot: dict[str, dict] = {}
             blocks: list[str] = ["🗓️ *Ежедневный отчёт по заявкам*", ""]
 
-            any_changes = False
+            any_ticker = False
 
             for (ticker, data), px in zip(portfolio.items(), prices):
                 if isinstance(px, Exception) or px is None:
@@ -1725,31 +1750,45 @@ async def daily_portfolio_plan_notifier(application, chat_id: int, hours: int = 
                 old = LAST_PLAN_SNAPSHOT.get(ticker)
                 diffs = _diff_snap(old, snap)
 
+                # Шапка тикера
+                status = _status_emoji(snap["entry"], snap["current"])
+                trend = _trend_emoji(old.get("current") if old else None, snap["current"])
+                header = (f"🔹 *{ticker}* {status}{trend} · вход {_fmt_price(snap['entry'])} · "
+                          f"тек {_fmt_price(snap['current'])}")
+                blocks.append(header)
+
+                # Объём
+                qty = snap["qty_shares"]; lot = max(1, snap["lot_size"])
+                blocks.append(f"🧾 объём {qty} акц. · ~{qty // lot} лота · лот {lot}")
+
+                # ✅ БАЗОВЫЕ УРОВНИ — ВСЕГДА показываем (в том числе SL)
+                base_levels = []
+                tps = snap.get("tps") or []
+                if len(tps) >= 1:
+                    base_levels.append(f"🎯 TP1: {tps[0]:.2f} ₽")
+                if len(tps) >= 2:
+                    base_levels.append(f"🎯 TP2: {tps[1]:.2f} ₽")
+                if snap.get("sl") is not None:
+                    base_levels.append(f"🛡️ SL: {snap['sl']:.2f} ₽")
+
+                if base_levels:
+                    blocks.append(" · ".join(base_levels))
+
+                # Изменения (если есть)
                 if diffs:
-                    any_changes = True
+                    for d in diffs:
+                        blocks.append(d)
 
-                    # Шапка тикера
-                    status = _status_emoji(snap["entry"], snap["current"])
-                    trend = _trend_emoji(old.get("current") if old else None, snap["current"])
-                    header = (f"🔹 *{ticker}* {status}{trend} · вход {_fmt_price(snap['entry'])} · "
-                              f"тек {_fmt_price(snap['current'])}")
-                    blocks.append(header)
+                blocks.append("")  # разделитель между тикерами
+                any_ticker = True
 
-                    # Строка объёма
-                    qty = snap["qty_shares"]; lot = max(1, snap["lot_size"])
-                    blocks.append(f"🧾 объём {qty} акц. · ~{qty // lot} лота · лот {lot}")
-
-                    # Изменения (TP1/TP2/SL/Текущая)
-                    blocks.extend(diffs)
-                    blocks.append("")  # пустая строка-разделитель
-
-            if not any_changes:
+            if not any_ticker:
                 blocks.append("👍 Без изменений по уровням.")
                 blocks.append("")
 
             text = "\n".join(blocks)
 
-            # отрезаем на куски если вдруг длинно
+            # Разбиение, если длинно
             if len(text) > 3500:
                 lines = text.split("\n")
                 parts, buf, acc = [], [], 0
@@ -1766,7 +1805,6 @@ async def daily_portfolio_plan_notifier(application, chat_id: int, hours: int = 
             else:
                 await application.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
 
-            # Обновляем baseline
             LAST_PLAN_SNAPSHOT = new_snapshot
 
         except Exception as e:
