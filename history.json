@@ -124,5 +124,12 @@
     "amount": 1,
     "price": 652.0,
     "total": 652.0
+  },
+  {
+    "ticker": "AFLT",
+    "action": "sell",
+    "amount": "всё",
+    "price": "n/a",
+    "total": "n/a"
   }
 ]
