@@ -56,6 +56,7 @@ LOTS_CACHE: dict[str, int] = {}
 
 # Константы
 BUY_PRICE, BUY_PRICE_TYPE, BUY_AMOUNT = range(3)
+SELL_AMOUNT, SELL_PRICE, SELL_PRICE_TYPE = range(3, 6)
 MAX_HISTORY_DAYS = 30
 TICKERS_FILE = "tickers.json"
 CANDIDATES_FILE = "candidates.json"
@@ -640,6 +641,184 @@ async def buy_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Введите цену покупки для {ticker} (в рублях):\n\nДля отмены напишите /cancel"
         )
         return BUY_PRICE
+
+async def sell_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Старт диалога продажи из кнопки Продать"""
+    query = update.callback_query
+    await safe_answer(query)
+    data = query.data
+    if not data.startswith("sell_"):
+        return ConversationHandler.END
+
+    ticker = data.split("_", 1)[1].upper()
+    context.user_data["sell_ticker"] = ticker
+
+    pos = portfolio.get(ticker)
+    if not pos:
+        await query.edit_message_text(f"⚠️ {ticker} нет в портфеле.")
+        return ConversationHandler.END
+
+    lot_size = await get_lot_size(ticker)
+    qty_have = int(pos.get("amount", 0))
+    lots_have = qty_have // max(lot_size, 1)
+
+    msg = (
+        f"📤 Продажа {ticker}\n"
+        f"В портфеле: {qty_have} акц. (~{lots_have} лота), лот {lot_size}\n\n"
+        f"1) Введите *сколько продано* — в акциях или лотах:\n"
+        f"   • Примеры: `15` (акций) или `2л` (2 лота)\n\n"
+        f"Для отмены — /cancel"
+    )
+    await query.edit_message_text(msg, parse_mode="Markdown")
+    return SELL_AMOUNT
+
+
+def _parse_sell_amount(raw: str, lot_size: int) -> int | None:
+    """Парсит количество из строки. Допускает '10', '2л', '2 l', '2 lot'."""
+    s = (raw or "").strip().lower().replace(" ", "")
+    if not s:
+        return None
+    # форматы: <число>л / <число>l / <число>lot — это лоты
+    if s.endswith("л") or s.endswith("l") or s.endswith("lot"):
+        num = s.rstrip("л").rstrip("l").rstrip("lot")
+        try:
+            lots = int(num)
+            return max(lots, 0) * max(lot_size, 1)
+        except Exception:
+            return None
+    # иначе — акции
+    try:
+        shares = int(s)
+        return max(shares, 0)
+    except Exception:
+        return None
+
+
+async def sell_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 1: получили количество (акции или лоты), проверили и попросили цену"""
+    text = (update.message.text or "").strip()
+    ticker = context.user_data.get("sell_ticker")
+    if not ticker:
+        await update.message.reply_text("⚠️ Тикер не найден. Начните заново из портфеля.")
+        return ConversationHandler.END
+
+    lot_size = await get_lot_size(ticker)
+    qty = _parse_sell_amount(text, lot_size)
+    if qty is None or qty <= 0:
+        await update.message.reply_text(
+            "⚠️ Некорректное количество. Примеры: `15` (акций) или `2л` (2 лота).",
+            parse_mode="Markdown"
+        )
+        return SELL_AMOUNT
+
+    have = int(portfolio.get(ticker, {}).get("amount", 0))
+    if qty > have:
+        await update.message.reply_text(
+            f"⚠️ У вас {have} акц. {ticker}. Нельзя продать {qty}. Введите заново."
+        )
+        return SELL_AMOUNT
+
+    # Сохраняем количество и просим цену
+    context.user_data["sell_qty"] = qty
+    await update.message.reply_text(
+        "2) Введите цену *числом* (например `126.40`).\n"
+        "После этого я уточню — это цена за 1 акцию или общая сумма.",
+        parse_mode="Markdown"
+    )
+    return SELL_PRICE
+
+
+async def sell_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 2: приняли число для цены и спрашиваем тип (за 1 акцию / общая сумма)"""
+    text = (update.message.text or "").strip().lower()
+
+    import re
+    nums = re.findall(r"\d+[.,]?\d*", text)
+    if not nums:
+        await update.message.reply_text("⚠️ Введите число (например 126.40).")
+        return SELL_PRICE
+
+    price_val = float(nums[0].replace(",", "."))
+    context.user_data["sell_price_raw"] = price_val
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Цена за 1 акцию", callback_data="sell_price_type_single"),
+            InlineKeyboardButton("Общая сумма", callback_data="sell_price_type_total"),
+        ]
+    ])
+    await update.message.reply_text(
+        f"Вы ввели {price_val:.2f} ₽.\nЭто цена за 1 акцию или общая сумма сделки?",
+        reply_markup=kb
+    )
+    return SELL_PRICE_TYPE
+
+
+async def sell_price_type_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 3: знаем тип цены — считаем, обновляем портфель, пишем в историю"""
+    query = update.callback_query
+    await safe_answer(query)
+    data = query.data
+
+    ticker = context.user_data.get("sell_ticker")
+    qty = int(context.user_data.get("sell_qty", 0))
+    price_raw = context.user_data.get("sell_price_raw")
+
+    if not ticker or not qty or price_raw is None:
+        await query.edit_message_text("⚠️ Недостаточно данных. Попробуйте снова.")
+        return ConversationHandler.END
+
+    lot_size = await get_lot_size(ticker)
+
+    if data == "sell_price_type_single":
+        price_per_share = float(price_raw)
+        total_sum = round(price_per_share * qty, 2)
+    elif data == "sell_price_type_total":
+        price_per_share = round(float(price_raw) / qty, 6)
+        total_sum = float(price_raw)
+    else:
+        await query.edit_message_text("Неверный выбор. Попробуйте снова.")
+        return SELL_PRICE_TYPE
+
+    # Обновляем портфель
+    pos = portfolio.get(ticker, {})
+    have = int(pos.get("amount", 0))
+    new_amount = max(have - qty, 0)
+
+    if new_amount == 0:
+        # удаляем тикер из портфеля
+        portfolio.pop(ticker, None)
+    else:
+        # цену входа оставляем прежней (средняя по оставшимся)
+        portfolio[ticker] = {"price": float(pos.get("price", 0.0)), "amount": new_amount}
+
+    save_portfolio()
+
+    # История
+    history.append({
+        "ticker": ticker,
+        "action": "sell",
+        "amount": qty,
+        "price": price_per_share,   # цена за 1 акцию
+        "total": round(total_sum, 2),
+        "mode": "manual",
+        "ts": datetime.now().isoformat()
+    })
+    save_history()
+
+    lots = qty // max(lot_size, 1)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="main_menu")]])
+
+    await query.edit_message_text(
+        "✅ Продажа выполнена\n"
+        f"• {ticker}: {qty} акц. (~{lots} лота)\n"
+        f"• Цена: {price_per_share:.2f} ₽ за 1 акцию\n"
+        f"• Сумма: {total_sum:.2f} ₽\n"
+        f"• Остаток в портфеле: {new_amount} акц.",
+        reply_markup=kb
+    )
+    return ConversationHandler.END
+
 
 async def get_moex_price(ticker: str) -> float:
     """Возвращает актуальную цену 1 акции (не лота) с MOEX.
