@@ -57,6 +57,7 @@ LOTS_CACHE: dict[str, int] = {}
 # Константы
 BUY_PRICE, BUY_PRICE_TYPE, BUY_AMOUNT = range(3)
 SELL_AMOUNT, SELL_PRICE, SELL_PRICE_TYPE = range(3, 6)
+SELL_QTY, SELL_PRICE = range(3)
 MAX_HISTORY_DAYS = 30
 TICKERS_FILE = "tickers.json"
 CANDIDATES_FILE = "candidates.json"
@@ -818,6 +819,153 @@ async def sell_price_type_handler(update: Update, context: ContextTypes.DEFAULT_
         reply_markup=kb
     )
     return ConversationHandler.END
+
+# ===== Продажа из кнопки "sell_{TICKER}" =====
+
+def _parse_qty_input(text: str, lot_size: int) -> int | None:
+    """
+    Парсит количество из текста:
+    - "20" => 20 акций
+    - "2 лота", "2 л", "2 lot", "2 lots" => 2 * lot_size акций
+    """
+    s = (text or "").strip().lower().replace(",", ".")
+    # попытка: «<число> лот(а/ов)»
+    import re
+    m = re.match(r"^\s*(\d+)\s*(лот|лота|лотов|лот[asy]?|lot[s]?)\s*$", s)
+    if m:
+        lots = int(m.group(1))
+        return max(lots * max(1, lot_size), 0)
+
+    # просто число = акции
+    m2 = re.match(r"^\s*(\d+)\s*$", s)
+    if m2:
+        return int(m2.group(1))
+
+    return None
+
+
+async def start_sell_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Старт диалога продажи из кнопки sell_{TICKER}"""
+    query = update.callback_query
+    await safe_answer(query)
+    data = query.data
+    ticker = data.split("_", 1)[1].upper().strip()
+
+    if ticker not in portfolio:
+        await query.edit_message_text(f"⚠️ {ticker} отсутствует в портфеле.")
+        return ConversationHandler.END
+
+    lot_size = await get_lot_size(ticker)
+    context.user_data["sell_ticker"] = ticker
+    context.user_data["sell_lot_size"] = lot_size
+
+    pos = portfolio.get(ticker, {})
+    have = int(pos.get("amount", 0))
+
+    await query.edit_message_text(
+        "✍️ Укажи сколько продать:\n"
+        f"— можно в АКЦИЯХ: `20`\n"
+        f"— или в ЛОТАХ: `2 лота`\n\n"
+        f"Лот для {ticker}: {lot_size}. В портфеле: {have} акц.",
+        parse_mode="Markdown"
+    )
+    return SELL_QTY
+
+
+async def sell_qty_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 2: количество"""
+    ticker = context.user_data.get("sell_ticker")
+    lot_size = int(context.user_data.get("sell_lot_size", 1))
+    qty_shares = _parse_qty_input(update.message.text, lot_size)
+
+    if not ticker or qty_shares is None or qty_shares <= 0:
+        await update.message.reply_text(
+            "⚠️ Некорректное количество. Примеры: `20` или `2 лота`",
+            parse_mode="Markdown"
+        )
+        return SELL_QTY
+
+    have = int(portfolio.get(ticker, {}).get("amount", 0))
+    if have <= 0:
+        await update.message.reply_text("⚠️ Позиции нет в портфеле.")
+        return ConversationHandler.END
+
+    if qty_shares > have:
+        await update.message.reply_text(
+            f"⚠️ В портфеле только {have} акц. Введите число ≤ {have}."
+        )
+        return SELL_QTY
+
+    context.user_data["sell_qty_shares"] = qty_shares
+    await update.message.reply_text("💵 Введите цену продажи за 1 акцию (₽). Пример: `126.40`",
+                                    parse_mode="Markdown")
+    return SELL_PRICE
+
+
+async def sell_price_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 3: цена"""
+    ticker = context.user_data.get("sell_ticker")
+    qty_shares = int(context.user_data.get("sell_qty_shares", 0))
+
+    if not ticker or qty_shares <= 0:
+        await update.message.reply_text("⚠️ Контекст продажи потерян. Начни заново из портфеля.")
+        return ConversationHandler.END
+
+    # парсим цену
+    try:
+        price_text = (update.message.text or "").strip().replace(",", ".")
+        price = float(price_text)
+        if price <= 0:
+            raise ValueError()
+    except Exception:
+        await update.message.reply_text("⚠️ Введите корректную цену, например: `126.40`",
+                                        parse_mode="Markdown")
+        return SELL_PRICE
+
+    # обновляем портфель
+    pos = portfolio.get(ticker, {})
+    have = int(pos.get("amount", 0))
+    new_amount = have - qty_shares
+
+    if new_amount > 0:
+        # среднюю цену не меняем — остаётся прежняя для остатка
+        portfolio[ticker]["amount"] = new_amount
+    else:
+        # всё продали — удаляем позицию
+        del portfolio[ticker]
+
+    save_portfolio()
+
+    # лог в историю
+    history.append({
+        "ticker": ticker,
+        "action": "sell",
+        "amount": qty_shares,
+        "price": price,
+        "total": round(price * qty_shares, 2)
+    })
+    save_history()
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Портфель", callback_data="portfolio")],
+        [InlineKeyboardButton("Главное меню", callback_data="main_menu")],
+    ])
+
+    await update.message.reply_text(
+        f"✅ Продажа учтена:\n"
+        f"• {ticker}\n"
+        f"• Кол-во: {qty_shares} акц.\n"
+        f"• Цена: {price:.2f} ₽ за 1 акцию\n"
+        f"• Сумма: {price * qty_shares:.2f} ₽",
+        reply_markup=kb
+    )
+    return ConversationHandler.END
+
+
+async def sell_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Продажа отменена.")
+    return ConversationHandler.END
+
 
 
 async def get_moex_price(ticker: str) -> float:
@@ -2525,6 +2673,17 @@ async def main():
     application.add_handler(CommandHandler("trades", trades_cmd))
     
     print("✅ CallbackQueryHandler добавлен")
+
+    conv_sell = ConversationHandler(
+    entry_points=[CallbackQueryHandler(start_sell_from_button, pattern="^sell_")],
+    states={
+        SELL_QTY:   [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_qty_step)],
+        SELL_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_price_step)],
+    },
+    fallbacks=[CommandHandler("cancel", sell_cancel)],
+    )
+    application.add_handler(conv_sell)
+
     application.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(?!buy_).*"))
 
 
