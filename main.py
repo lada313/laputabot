@@ -1880,7 +1880,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return  # важно: не продолжать обработку дальше
       
    # В button_handler:
- elif data.startswith("sell_"):
+  elif data.startswith("sell_"):
      ticker = data.split("_", 1)[1]
      if ticker not in portfolio:
          await query.edit_message_text(f"⚠️ {ticker} отсутствует в портфеле.")
