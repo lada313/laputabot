@@ -750,6 +750,7 @@ async def sell_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Вы ввели {price_val:.2f} ₽.\nЭто цена за 1 акцию или общая сумма сделки?",
         reply_markup=kb
+    ) 
 async def sell_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Старт диалога продажи из кнопки Продать"""
     query = update.callback_query
