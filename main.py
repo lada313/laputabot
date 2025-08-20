@@ -2585,57 +2585,57 @@ async def main():
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).request(request).build()
 
          # --- ConversationHandler: покупка ---
-     conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(buy_from_button, pattern="^buy_")],
-         states={
-            BUY_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_price)],
-            BUY_PRICE_TYPE: [CallbackQueryHandler(price_type_handler, pattern="^price_type_")],
-            BUY_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_amount)],
-        },
-        fallbacks=[
-            CommandHandler('cancel', buy_cancel),
-            MessageHandler(filters.COMMAND, buy_cancel),
-        ],
-    )
-
-    # --- ConversationHandler: продажа ---
-    # Вариант без выбора типа цены продажи:
-    sell_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(sell_from_button, pattern="^sell_")],
+    conv_handler = ConversationHandler(
+       entry_points=[CallbackQueryHandler(buy_from_button, pattern="^buy_")],
         states={
-            SELL_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_amount)],  # или sell_qty_step
-            SELL_PRICE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_price)],   # или sell_price_step
-        },
-        fallbacks=[
-            CommandHandler('cancel', sell_cancel),
-            MessageHandler(filters.COMMAND, sell_cancel),
-        ],
-    )
+           BUY_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_price)],
+           BUY_PRICE_TYPE: [CallbackQueryHandler(price_type_handler, pattern="^price_type_")],
+           BUY_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_amount)],
+       },
+       fallbacks=[
+           CommandHandler('cancel', buy_cancel),
+           MessageHandler(filters.COMMAND, buy_cancel),
+       ],
+   )
 
-    # Регистрируем СНАЧАЛА оба конверсейшна
-    application.add_handler(conv_handler)
-    application.add_handler(sell_conv_handler)
+   # --- ConversationHandler: продажа ---
+   # Вариант без выбора типа цены продажи:
+   sell_conv_handler = ConversationHandler(
+       entry_points=[CallbackQueryHandler(sell_from_button, pattern="^sell_")],
+       states={
+           SELL_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_amount)],  # или sell_qty_step
+           SELL_PRICE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_price)],   # или sell_price_step
+       },
+       fallbacks=[
+           CommandHandler('cancel', sell_cancel),
+           MessageHandler(filters.COMMAND, sell_cancel),
+       ],
+   )
 
-    print("✅ ConversationHandlers добавлены первыми")
+   # Регистрируем СНАЧАЛА оба конверсейшна
+   application.add_handler(conv_handler)
+   application.add_handler(sell_conv_handler)
 
-    # Команды
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("addticker", add_ticker))
-    application.add_handler(CommandHandler("check_api", check_api))
-    application.add_handler(CommandHandler("ideas", suggest_ideas_by_budget))
-    application.add_handler(CommandHandler("refresh_candidates", refresh_candidates_command))
+   print("✅ ConversationHandlers добавлены первыми")
 
-    application.add_handler(CommandHandler("debug_aflt", debug_aflt))
-    application.add_handler(CommandHandler("lot", lot_cmd))
-    application.add_handler(CommandHandler("debug_price", debug_price))
-    application.add_handler(CommandHandler("trades", trades_cmd))
+   # Команды
+   application.add_handler(CommandHandler("start", start))
+   application.add_handler(CommandHandler("addticker", add_ticker))
+   application.add_handler(CommandHandler("check_api", check_api))
+   application.add_handler(CommandHandler("ideas", suggest_ideas_by_budget))
+   application.add_handler(CommandHandler("refresh_candidates", refresh_candidates_command))
 
-    print("✅ Командные хэндлеры добавлены")
+   application.add_handler(CommandHandler("debug_aflt", debug_aflt))
+   application.add_handler(CommandHandler("lot", lot_cmd))
+   application.add_handler(CommandHandler("debug_price", debug_price))
+   application.add_handler(CommandHandler("trades", trades_cmd))
 
-    # Общий обработчик всех остальных callback-кнопок, кроме buy_/sell_
-    application.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(?!buy_)(?!sell_).*"))
+   print("✅ Командные хэндлеры добавлены")
 
-    print("✅ CallbackQueryHandler добавлен")
+   # Общий обработчик всех остальных callback-кнопок, кроме buy_/sell_
+   application.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(?!buy_)(?!sell_).*"))
+
+   print("✅ CallbackQueryHandler добавлен")
 
 
 
