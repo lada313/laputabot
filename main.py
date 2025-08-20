@@ -2584,7 +2584,7 @@ async def main():
     )
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).request(request).build()
 
-         # --- ConversationHandler: покупка ---
+    # --- ConversationHandler: покупка ---
     conv_handler = ConversationHandler(
        entry_points=[CallbackQueryHandler(buy_from_button, pattern="^buy_")],
         states={
@@ -2596,11 +2596,10 @@ async def main():
            CommandHandler('cancel', buy_cancel),
            MessageHandler(filters.COMMAND, buy_cancel),
        ],
-   )
-
-   # --- ConversationHandler: продажа ---
-   # Вариант без выбора типа цены продажи:
-   sell_conv_handler = ConversationHandler(
+    )
+    # --- ConversationHandler: продажа ---
+    # Вариант без выбора типа цены продажи:
+    sell_conv_handler = ConversationHandler(
        entry_points=[CallbackQueryHandler(sell_from_button, pattern="^sell_")],
        states={
            SELL_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_amount)],  # или sell_qty_step
