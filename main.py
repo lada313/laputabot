@@ -2611,30 +2611,30 @@ async def main():
        ],
    )
 
-   # Регистрируем СНАЧАЛА оба конверсейшна
-   application.add_handler(conv_handler)
-   application.add_handler(sell_conv_handler)
+    # Регистрируем СНАЧАЛА оба конверсейшна
+    application.add_handler(conv_handler)
+    application.add_handler(sell_conv_handler)
 
-   print("✅ ConversationHandlers добавлены первыми")
+    print("✅ ConversationHandlers добавлены первыми")
 
-   # Команды
-   application.add_handler(CommandHandler("start", start))
-   application.add_handler(CommandHandler("addticker", add_ticker))
-   application.add_handler(CommandHandler("check_api", check_api))
-   application.add_handler(CommandHandler("ideas", suggest_ideas_by_budget))
-   application.add_handler(CommandHandler("refresh_candidates", refresh_candidates_command))
+    # Команды
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("addticker", add_ticker))
+    application.add_handler(CommandHandler("check_api", check_api))
+    application.add_handler(CommandHandler("ideas", suggest_ideas_by_budget))
+    application.add_handler(CommandHandler("refresh_candidates", refresh_candidates_command))
 
-   application.add_handler(CommandHandler("debug_aflt", debug_aflt))
-   application.add_handler(CommandHandler("lot", lot_cmd))
-   application.add_handler(CommandHandler("debug_price", debug_price))
-   application.add_handler(CommandHandler("trades", trades_cmd))
+    application.add_handler(CommandHandler("debug_aflt", debug_aflt))
+    application.add_handler(CommandHandler("lot", lot_cmd))
+    application.add_handler(CommandHandler("debug_price", debug_price))
+    application.add_handler(CommandHandler("trades", trades_cmd))
 
-   print("✅ Командные хэндлеры добавлены")
+    print("✅ Командные хэндлеры добавлены")
 
-   # Общий обработчик всех остальных callback-кнопок, кроме buy_/sell_
-   application.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(?!buy_)(?!sell_).*"))
+    # Общий обработчик всех остальных callback-кнопок, кроме buy_/sell_
+    application.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(?!buy_)(?!sell_).*"))
 
-   print("✅ CallbackQueryHandler добавлен")
+    print("✅ CallbackQueryHandler добавлен")
 
 
 
