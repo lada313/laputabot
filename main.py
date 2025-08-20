@@ -56,7 +56,7 @@ LOTS_CACHE: dict[str, int] = {}
 
 # Константы
 BUY_PRICE, BUY_PRICE_TYPE, BUY_AMOUNT = range(3)
-SELL_AMOUNT, SELL_PRICE, SELL_PRICE_TYPE = range(3, 6)
+SELL_AMOUNT, SELL_PRICE, SELL_PRICE_TYPE = range(3)
 MAX_HISTORY_DAYS = 30
 TICKERS_FILE = "tickers.json"
 CANDIDATES_FILE = "candidates.json"
