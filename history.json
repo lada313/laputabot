@@ -191,5 +191,12 @@
     "amount": 10,
     "price": 63.16,
     "total": 631.6
+  },
+  {
+    "ticker": "SNGSP",
+    "action": "buy",
+    "amount": 10,
+    "price": 44.579,
+    "total": 445.79
   }
 ]
