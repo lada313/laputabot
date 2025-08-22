@@ -154,5 +154,12 @@
     "amount": 1,
     "price": 645.1,
     "total": 645.1
+  },
+  {
+    "ticker": "ROSN",
+    "action": "buy",
+    "amount": 2,
+    "price": 460.7,
+    "total": 921.4
   }
 ]

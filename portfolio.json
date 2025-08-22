@@ -10,5 +10,9 @@
   "PIKK": {
     "price": 650.25,
     "amount": 4
+  },
+  "ROSN": {
+    "price": 460.7,
+    "amount": 2
   }
 }
