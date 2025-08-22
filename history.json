@@ -207,5 +207,12 @@
     "total": 1320.0,
     "mode": "manual",
     "ts": "2025-08-22T16:24:37.450333"
+  },
+  {
+    "ticker": "AFLT",
+    "action": "buy",
+    "amount": 10,
+    "price": 63.26,
+    "total": 632.6
   }
 ]
