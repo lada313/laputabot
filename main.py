@@ -2600,16 +2600,18 @@ async def main():
     # --- ConversationHandler: продажа ---
     # Вариант без выбора типа цены продажи:
     sell_conv_handler = ConversationHandler(
-       entry_points=[CallbackQueryHandler(sell_from_button, pattern="^sell_")],
-       states={
-           SELL_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_amount)],  # или sell_qty_step
-           SELL_PRICE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_price)],   # или sell_price_step
-       },
-       fallbacks=[
-           CommandHandler('cancel', sell_cancel),
-           MessageHandler(filters.COMMAND, sell_cancel),
-       ],
-   )
+    entry_points=[CallbackQueryHandler(sell_from_button, pattern="^sell_")],
+    states={
+        SELL_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_amount)],
+        SELL_PRICE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_price)],
+        # ВАЖНО: добавляем шаг выбора типа цены (кнопки "за 1 акцию" / "общая сумма")
+        SELL_PRICE_TYPE: [CallbackQueryHandler(sell_price_type_handler, pattern="^sell_price_type_")],
+    },
+    fallbacks=[
+        CommandHandler('cancel', sell_cancel),
+        MessageHandler(filters.COMMAND, sell_cancel),
+    ],
+    )
 
     # Регистрируем СНАЧАЛА оба конверсейшна
     application.add_handler(conv_handler)
