@@ -175,5 +175,14 @@
     "amount": 10,
     "price": 44.625,
     "total": 446.25
+  },
+  {
+    "ticker": "ROSN",
+    "action": "sell",
+    "amount": 2,
+    "price": 453.8,
+    "total": 907.6,
+    "mode": "manual",
+    "ts": "2025-08-22T14:42:39.731237"
   }
 ]
