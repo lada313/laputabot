@@ -214,5 +214,12 @@
     "amount": 10,
     "price": 63.26,
     "total": 632.6
+  },
+  {
+    "ticker": "VTBR",
+    "action": "buy",
+    "amount": 8,
+    "price": 77.09,
+    "total": 616.72
   }
 ]
