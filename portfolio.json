@@ -18,5 +18,9 @@
   "RAGR": {
     "price": 131.58,
     "amount": 25
+  },
+  "SNGSP": {
+    "price": 44.625,
+    "amount": 10
   }
 }
