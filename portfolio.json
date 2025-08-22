@@ -18,5 +18,9 @@
   "SNGSP": {
     "price": 44.625,
     "amount": 10
+  },
+  "AFLT": {
+    "price": 63.16,
+    "amount": 10
   }
 }
