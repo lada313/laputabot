@@ -147,5 +147,12 @@
     "total": 689.0,
     "mode": "manual",
     "ts": "2025-08-22T14:32:35.545445"
+  },
+  {
+    "ticker": "PIKK",
+    "action": "buy",
+    "amount": 1,
+    "price": 645.1,
+    "total": 645.1
   }
 ]
