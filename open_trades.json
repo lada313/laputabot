@@ -1,17 +1,17 @@
 {
   "PIKK": {
     "name": "ПИК",
-    "created_at": "2025-08-11T13:33:46.688982",
-    "entry_price": 652.6,
-    "tp1": 685.23,
-    "tp2": 717.86,
-    "sl": 633.022,
+    "created_at": "2025-08-25T07:51:37.314973",
+    "entry_price": 671.9,
+    "tp1": 705.495,
+    "tp2": 739.09,
+    "sl": 651.743,
     "lot_size": 1,
-    "qty": 5,
-    "status": "closed",
+    "qty": 4,
+    "status": "open",
     "trail_active": false,
-    "trail_anchor": 652.6,
-    "trail_sl": 633.022,
+    "trail_anchor": 671.9,
+    "trail_sl": 651.743,
     "last_notified": 0.0
   }
 }
