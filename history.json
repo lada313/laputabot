@@ -230,5 +230,14 @@
     "total": 660.0,
     "mode": "manual",
     "ts": "2025-08-25T07:40:52.641215"
+  },
+  {
+    "ticker": "EUTR",
+    "action": "sell",
+    "amount": 2,
+    "price": 123.355,
+    "total": 246.71,
+    "mode": "manual",
+    "ts": "2025-08-25T08:14:40.172208"
   }
 ]
