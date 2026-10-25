@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+data/
+*.bak
+__pycache__/
+*.py[cod]
+.venv/
+# Legacy tracked JSON needs a separate, reviewed git rm --cached operation.
+portfolio.json
+history.json
+open_trades.json
+tickers.json
+ledger.json
