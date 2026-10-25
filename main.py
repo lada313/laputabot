@@ -9,7 +9,7 @@ from tinkoff.invest import CandleInterval
 from datetime import datetime, timedelta
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes,
-    CallbackQueryHandler, ConversationHandler, MessageHandler, filters
+    CallbackQueryHandler, ConversationHandler, MessageHandler, TypeHandler, filters
 )
 from telegram.error import BadRequest
 from telegram.error import NetworkError
@@ -20,15 +20,16 @@ from keep_alive import keep_alive
 from tinkoff.invest import AsyncClient
 from self_ping import self_ping
 from notifier import notify_price_changes
-from save_json import start_git_worker, enqueue_git_push
+from save_json import start_git_worker
+from storage import data_file, prepare_storage, read_json, atomic_json, validate_portfolio, validate_tickers
+from security import (allowed_user_ids, make_access_guard, configure_logging, parse_money,
+                      parse_amount, valid_ticker, MAX_TICKERS, MAX_AMOUNT, clear_trade,
+                      trade_active, valid_price_callback, limited_action)
 from analysis import analyze_stock, build_portfolio_order_plan  # NEW
 from grpc import StatusCode
 
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 TINKOFF_TOKEN = os.getenv("TINKOFF_TOKEN")
@@ -58,9 +59,9 @@ LOTS_CACHE: dict[str, int] = {}
 BUY_PRICE, BUY_PRICE_TYPE, BUY_AMOUNT = range(3)
 SELL_AMOUNT, SELL_PRICE, SELL_PRICE_TYPE = range(3, 6)
 MAX_HISTORY_DAYS = 30
-TICKERS_FILE = "tickers.json"
-CANDIDATES_FILE = "candidates.json"
-OPEN_TRADES_FILE = "open_trades.json"
+TICKERS_FILE = data_file("tickers.json")
+CANDIDATES_FILE = data_file("candidates.json")
+OPEN_TRADES_FILE = data_file("open_trades.json")
 
 async def safe_edit_message(query, text, reply_markup=None, parse_mode=None):
     try:
@@ -191,8 +192,7 @@ async def update_candidates_list_tinkoff() -> int:
             continue
 
     try:
-        with open(CANDIDATES_FILE, "w", encoding="utf-8") as f:
-            json.dump(candidates, f, ensure_ascii=False, indent=2)
+        atomic_json(CANDIDATES_FILE, candidates)
         logger.info(f"✅ Tinkoff: обновлён candidates.json — {len(candidates)} тикеров")
         return len(candidates)
     except Exception as e:
@@ -299,8 +299,7 @@ async def update_candidates_list_moex() -> int:
         return 0
 
     try:
-        with open(CANDIDATES_FILE, "w", encoding="utf-8") as f:
-            json.dump(filtered, f, ensure_ascii=False, indent=2)
+        atomic_json(CANDIDATES_FILE, filtered)
         logger.info(f"✅ MOEX (фильтр Tinkoff): обновлён candidates.json — {len(filtered)} тикеров")
         return len(filtered)
     except Exception as e:
@@ -328,23 +327,11 @@ async def refresh_candidates_periodically(interval_hours: int = 24):
         await asyncio.sleep(interval_hours * 3600)
 
 def save_tickers():
-    try:
-        with open(TICKERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(TICKERS, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Ошибка при сохранении тикеров: {e}")
+    atomic_json(TICKERS_FILE, validate_tickers(TICKERS))
 
 def load_tickers():
-    global TICKERS
-    try:
-        with open(TICKERS_FILE, "r", encoding="utf-8") as f:
-            TICKERS.update(json.load(f))
-            print("✅ Загружены тикеры:", TICKERS)
-    except FileNotFoundError:
-        print("❌ Файл тикеров не найден — создаём новый.")
-        save_tickers()
-    except Exception as e:
-        print(f"⚠️ Ошибка при загрузке тикеров: {e}")
+    TICKERS.clear()
+    TICKERS.update(validate_tickers(read_json(TICKERS_FILE, {})))
 
 async def update_candidates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Обновляю список кандидатов...")
@@ -495,53 +482,14 @@ async def get_lot_size(ticker: str) -> int:
     return LOTS_CACHE[t]
 
 def save_portfolio():
-    try:
-        if not isinstance(portfolio, dict):
-            raise ValueError("⚠️ Неверный формат портфеля: должен быть dict")
-
-        for ticker, data in portfolio.items():
-            if not isinstance(data, dict) or "price" not in data or "amount" not in data:
-                raise ValueError(f"⚠️ Неверные данные по {ticker}: {data}")
-
-        with open("portfolio.json", "w", encoding="utf-8") as f:
-            json.dump(portfolio, f, ensure_ascii=False, indent=2)
-        enqueue_git_push("Update portfolio.json")
-        print("✅ Портфель сохранён:", portfolio)
-
-    except Exception as e:
-        print(f"❌ Ошибка при сохранении портфеля: {e}")
+    atomic_json(data_file("ledger.json"), {"portfolio": validate_portfolio(portfolio), "history": history})
 
 def load_portfolio():
-    global portfolio
-    try:
-        if not os.path.exists("portfolio.json"):
-            print("📂 Файл портфеля не найден. Создаём пустой.")
-            save_portfolio()
-            return
-
-        with open("portfolio.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        if not isinstance(data, dict):
-            raise ValueError("❌ Формат файла портфеля повреждён (ожидался dict)")
-
-        for ticker, item in data.items():
-            if not isinstance(item, dict) or "price" not in item or "amount" not in item:
-                raise ValueError(f"❌ Неверная структура для {ticker}: {item}")
-
-        portfolio.clear()
-        portfolio.update(data)
-        print("✅ Портфель загружен:", portfolio)
-
-    except json.JSONDecodeError:
-        print("❌ Ошибка чтения JSON. Файл повреждён. Создаём новый.")
-        portfolio.clear()
-        save_portfolio()
-
-    except Exception as e:
-        print(f"❌ Ошибка при загрузке портфеля: {e}")
-        portfolio.clear()
-        save_portfolio()
+    # Fail closed on corruption; do not overwrite the source or its backup.
+    ledger = read_json(data_file("ledger.json"), None)
+    data = validate_portfolio(ledger["portfolio"] if ledger is not None else read_json(data_file("portfolio.json"), {}))
+    portfolio.clear()
+    portfolio.update(data)
 
 def score_from_prices_local(prices: List[float]) -> float:
     # тот же алгоритм, что в suggest_ideas_by_budget
@@ -568,15 +516,19 @@ def score_from_prices_local(prices: List[float]) -> float:
     return float(round((100 - rsi) + bonus, 2))
 
 
-def save_history():
-    try:
-        with open("history.json", "w", encoding="utf-8") as f:
-            json.dump(history, f, ensure_ascii=False, indent=2)
-        enqueue_git_push("Update history.json")
-    except Exception as e:
-        print(f"Ошибка при сохранении истории: {e}")
+def commit_trade(new_portfolio, record):
+    new_history = history + [record]
+    atomic_json(data_file("ledger.json"), {
+        "portfolio": validate_portfolio(new_portfolio), "history": new_history,
+    })
+    portfolio.clear()
+    portfolio.update(new_portfolio)
+    history[:] = new_history
 
-# ---------- helpers для визуализации портфеля ----------
+
+def save_history():
+    save_portfolio()
+
 def _fmt_money(v: float) -> str:
     return f"{v:,.2f} ₽".replace(",", " ")  # тонкий пробел для разрядов
 
@@ -620,27 +572,24 @@ def _arrow_vs_current(level: float, current: float) -> str:
     return "→"
 
 def load_history():
-  global history
-  try:
-      with open("history.json", "r", encoding="utf-8") as f:
-          history.extend(json.load(f))
-  except FileNotFoundError:
-      save_history()
-  except Exception as e:
-      print(f"Ошибка при загрузке истории: {e}")
+    ledger = read_json(data_file("ledger.json"), None)
+    data = ledger["history"] if ledger is not None else read_json(data_file("history.json"), [])
+    if not isinstance(data, list):
+        raise ValueError("Invalid history structure")
+    history.clear()
+    history.extend(data)
 
 async def buy_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await safe_answer(query)
-    data = query.data
-
-    if data.startswith("buy_"):
-        ticker = query.data.split("_", 1)[1]
-        context.user_data['buy_ticker'] = ticker
-        await query.edit_message_text(
-            f"Введите цену покупки для {ticker} (в рублях):\n\nДля отмены напишите /cancel"
-        )
-        return BUY_PRICE
+    ticker = query.data.split("_", 1)[1]
+    if not valid_ticker(ticker) or ticker not in TICKERS and ticker not in portfolio:
+        await query.message.reply_text("Тикер недоступен. Откройте актуальное меню.")
+        return ConversationHandler.END
+    clear_trade(context)
+    context.user_data.update(buy_ticker=ticker, trade_kind="buy", trade_started=time.monotonic())
+    await query.edit_message_text(f"Введите цену покупки для {ticker}. Для отмены /cancel")
+    return BUY_PRICE
 
 async def sell_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Старт диалога продажи из кнопки Продать"""
@@ -651,7 +600,10 @@ async def sell_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     ticker = data.split("_", 1)[1].upper()
-    context.user_data["sell_ticker"] = ticker
+    if not valid_ticker(ticker):
+        return ConversationHandler.END
+    clear_trade(context)
+    context.user_data.update(sell_ticker=ticker, trade_kind="sell", trade_started=time.monotonic())
 
     pos = portfolio.get(ticker)
     if not pos:
@@ -674,26 +626,16 @@ async def sell_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _parse_sell_amount(raw: str, lot_size: int) -> int | None:
-    """Парсит количество из строки. Допускает '10', '2л', '2 l', '2 lot'."""
-    s = (raw or "").strip().lower().replace(" ", "")
-    if not s:
-        return None
-    if s.endswith("л") or s.endswith("l") or s.endswith("lot"):
-        num = s.rstrip("л").rstrip("l").rstrip("lot")
-        try:
-            lots = int(num)
-            return max(lots, 0) * max(lot_size, 1)
-        except Exception:
-            return None
     try:
-        shares = int(s)
-        return max(shares, 0)
-    except Exception:
+        return parse_amount(raw, lot_size)
+    except ValueError:
         return None
-
 
 async def sell_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Шаг 1: получили количество (акции или лоты), проверили и попросили цену"""
+    if not trade_active(context, "sell"):
+        clear_trade(context)
+        await update.message.reply_text("Сессия истекла. Начните операцию заново.")
+        return ConversationHandler.END
     text = (update.message.text or "").strip()
     ticker = context.user_data.get("sell_ticker")
     if not ticker:
@@ -710,7 +652,7 @@ async def sell_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return SELL_AMOUNT
 
     have = int(portfolio.get(ticker, {}).get("amount", 0))
-    if qty > have:
+    if qty > have or qty % lot_size != 0:
         await update.message.reply_text(
             f"⚠️ У вас {have} акц. {ticker}. Нельзя продать {qty}. Введите заново."
         )
@@ -729,13 +671,16 @@ async def sell_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def sell_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Шаг 2: приняли число для цены и спрашиваем тип (за 1 акцию / общая сумма)"""
     text = (update.message.text or "").strip().lower()
-    import re
-    nums = re.findall(r"\d+[.,]?\d*", text)
-    if not nums:
-        await update.message.reply_text("⚠️ Введите число (например 126.40).")
+    if not trade_active(context, "sell"):
+        clear_trade(context)
+        await update.message.reply_text("Сессия истекла. Начните продажу заново.")
+        return ConversationHandler.END
+    try:
+        price_val = parse_money(text)
+    except ValueError as error:
+        await update.message.reply_text(str(error))
         return SELL_PRICE
 
-    price_val = float(nums[0].replace(",", "."))
     context.user_data["sell_price_raw"] = price_val
 
     kb = InlineKeyboardMarkup([
@@ -744,10 +689,11 @@ async def sell_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("Общая сумма", callback_data="sell_price_type_total"),
         ]
     ])
-    await update.message.reply_text(
+    prompt = await update.message.reply_text(
         f"Вы ввели {price_val:.2f} ₽.\nЭто цена за 1 акцию или общая сумма сделки?",
         reply_markup=kb
     )
+    context.user_data["trade_price_message"] = (prompt.chat.id, prompt.message_id)
     return SELL_PRICE_TYPE
 
 
@@ -756,6 +702,10 @@ async def sell_price_type_handler(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await safe_answer(query)
     data = query.data
+    if not valid_price_callback(query, context, "sell"):
+        await query.message.reply_text("Эта кнопка устарела. Используйте последнее сообщение операции.")
+        return SELL_PRICE_TYPE
+
 
     ticker = context.user_data.get("sell_ticker")
     qty = int(context.user_data.get("sell_qty", 0))
@@ -766,12 +716,15 @@ async def sell_price_type_handler(update: Update, context: ContextTypes.DEFAULT_
         return ConversationHandler.END
 
     lot_size = await get_lot_size(ticker)
+    if not valid_price_callback(query, context, "sell"):
+        clear_trade(context)
+        return ConversationHandler.END
 
     if data == "sell_price_type_single":
         price_per_share = float(price_raw)
         total_sum = round(price_per_share * qty, 2)
     elif data == "sell_price_type_total":
-        price_per_share = round(float(price_raw) / qty, 6)
+        price_per_share = float(price_raw) / qty
         total_sum = float(price_raw)
     else:
         await query.edit_message_text("Неверный выбор. Попробуйте снова.")
@@ -779,25 +732,25 @@ async def sell_price_type_handler(update: Update, context: ContextTypes.DEFAULT_
 
     pos = portfolio.get(ticker, {})
     have = int(pos.get("amount", 0))
-    new_amount = max(have - qty, 0)
-
+    if qty > have or qty % lot_size != 0:
+        clear_trade(context)
+        await query.message.reply_text("Остаток изменился или количество не кратно лоту. Начните продажу заново.")
+        return ConversationHandler.END
+    if not 0.000001 <= price_per_share <= 1_000_000_000:
+        await query.message.reply_text("Цена за акцию вне допустимого диапазона.")
+        return SELL_PRICE_TYPE
+    new_amount = have - qty
+    new_portfolio = dict(portfolio)
     if new_amount == 0:
-        portfolio.pop(ticker, None)
+        new_portfolio.pop(ticker, None)
     else:
-        portfolio[ticker] = {"price": float(pos.get("price", 0.0)), "amount": new_amount}
-
-    save_portfolio()
-
-    history.append({
-        "ticker": ticker,
-        "action": "sell",
-        "amount": qty,
-        "price": price_per_share,
-        "total": round(total_sum, 2),
-        "mode": "manual",
-        "ts": datetime.now().isoformat()
+        new_portfolio[ticker] = {"price": float(pos["price"]), "amount": new_amount}
+    commit_trade(new_portfolio, {
+        "ticker": ticker, "action": "sell", "amount": qty,
+        "price": price_per_share, "total": round(total_sum, 2),
+        "mode": "manual", "ts": datetime.now().isoformat(),
     })
-    save_history()
+    clear_trade(context)
 
     lots = qty // max(lot_size, 1)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="main_menu")]])
@@ -814,6 +767,7 @@ async def sell_price_type_handler(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def sell_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    clear_trade(context)
     await update.message.reply_text("❌ Продажа отменена.")
     return ConversationHandler.END
 
@@ -939,7 +893,7 @@ async def show_open_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await safe_answer(query)
     try:
-        data = _load_open_trades_safe("open_trades.json")
+        data = _load_open_trades_safe()
         if not data:
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="main_menu")]])
             await query.edit_message_text("📭 Открытых сделок нет.", reply_markup=kb)
@@ -982,23 +936,17 @@ def upsert_open_trade(ticker: str, name: str, entry_price: float, tp1: float, tp
             "created_at": datetime.now().isoformat()
         }
 
-        with open(OPEN_TRADES_FILE, "w", encoding="utf-8") as f:
-            json.dump(trades, f, ensure_ascii=False, indent=2)
+        atomic_json(OPEN_TRADES_FILE, trades)
 
     except Exception as e:
         logger.error(f"Ошибка записи сделки {ticker}: {e}")
 
 # --- helpers для экрана "Сделки" ---
-def _load_open_trades_safe(path: str = "open_trades.json") -> dict:
-    try:
-        if not os.path.exists(path) or os.path.getsize(path) == 0:
-            return {}
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        # файл может быть пуст/повреждён во время записи — просто вернём пусто
-        return {}
+def _load_open_trades_safe(path: str = OPEN_TRADES_FILE) -> dict:
+    data = read_json(path, {})
+    if not isinstance(data, dict):
+        raise ValueError("Invalid open trades structure")
+    return data
 
 def _fmt_trade_block(ticker: str, tr: dict) -> str:
     name = tr.get("name", ticker)
@@ -1033,7 +981,7 @@ def _fmt_trade_block(ticker: str, tr: dict) -> str:
 
 async def trades_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        data = _load_open_trades_safe("open_trades.json")
+        data = _load_open_trades_safe()
         if not data:
             await update.message.reply_text("📭 Открытых сделок нет.")
             return
@@ -1056,6 +1004,9 @@ async def lot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Использование: /lot <TICKER>")
         return
     t = context.args[0].upper()
+    if not valid_ticker(t):
+        await update.message.reply_text("Некорректный тикер")
+        return
     lot = await get_lot_size(t)
     await update.message.reply_text(f"{t}: лот = {lot}")
 
@@ -1771,7 +1722,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
       await show_watchlist(update, context)
 
   elif data == "reset":
-      await reset_portfolio(update, context)
+      await query.edit_message_text(
+          "Очистить портфель? История операций сохранится.",
+          reply_markup=InlineKeyboardMarkup([
+              [InlineKeyboardButton("Очистить", callback_data="confirm_reset")],
+              [InlineKeyboardButton("Отмена", callback_data="main_menu")],
+          ]))
+      context.user_data["reset_prompt"] = (query.message.chat.id, query.message.message_id, time.monotonic())
+  elif data == "confirm_reset":
+      confirmation = context.user_data.pop("reset_prompt", None)
+      if (confirmation and confirmation[:2] == (query.message.chat.id, query.message.message_id)
+              and time.monotonic() - confirmation[2] <= 60):
+          await reset_portfolio(update, context)
 
   elif data == "add_ticker":
     await query.edit_message_text(
@@ -1781,13 +1743,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/addticker AAPL Apple"
     )
   elif data == "update_candidates":
-      await safe_answer(query)
-      await query.edit_message_text("⏳ Обновляю список кандидатов...")
-      try:
-         count = await update_candidates_list()
-         await query.edit_message_text(f"✅ Обновлено: {count} тикеров.")
-      except Exception as e:
-         await query.edit_message_text(f"❌ Ошибка обновления: {e}")
+      await refresh_candidates_command(update, context)
   elif data == "history":
       if not history:
           await query.edit_message_text("История операций пуста.")
@@ -1818,8 +1774,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
   elif data.startswith("add_"):
     ticker = data.split("_", 1)[1]
+    if not valid_ticker(ticker) or len(TICKERS) >= MAX_TICKERS:
+        await query.message.reply_text("Тикер недоступен или достигнут лимит списка.")
+        return
     # попробуем подтянуть имя из candidates.json
     name = ticker
+    candidates = {}
     try:
         with open(CANDIDATES_FILE, "r", encoding="utf-8") as f:
             candidates = json.load(f)
@@ -1828,11 +1788,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
+    if ticker not in candidates:
+        await query.message.reply_text("Тикер отсутствует в актуальном справочнике.")
+        return
     if ticker in TICKERS:
         await query.edit_message_text(f"{ticker} уже в отслеживаемых.")
     else:
-        TICKERS[ticker] = name
-        save_tickers()
+        updated = dict(TICKERS, **{ticker: name})
+        atomic_json(TICKERS_FILE, validate_tickers(updated))
+        TICKERS.update(updated)
         await query.edit_message_text(
             f"➕ Добавлен {ticker} — {name} в список отслеживаемых.",
             reply_markup=InlineKeyboardMarkup(
@@ -1841,6 +1805,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
   elif data == "main_menu":
+    context.user_data.pop("reset_prompt", None)
     await query.edit_message_text("Главное меню:", reply_markup=main_menu_kb())
       
   elif data.startswith("ideas_"):
@@ -1867,8 +1832,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
   elif data.startswith("remove_"):
     ticker = data.split("_", 1)[1]
     if ticker in TICKERS:
-        del TICKERS[ticker]
-        save_tickers()
+        updated = dict(TICKERS)
+        del updated[ticker]
+        atomic_json(TICKERS_FILE, validate_tickers(updated))
+        TICKERS.clear()
+        TICKERS.update(updated)
         await query.edit_message_text(f"Тикер {ticker} удалён из списка отслеживаемых.")
 
   elif data.startswith("signals_"):
@@ -1881,19 +1849,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
   return ConversationHandler.END
 
 async def reset_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-       query = update.callback_query
-       await safe_answer(query)
-       global portfolio, price_history, last_signal, TICKERS
-       portfolio.clear()
-       price_history.clear()
-       last_signal.clear()
-       save_portfolio()
-       TICKERS = {
-           "MTSS": "МТС",
-           "PHOR": "ФосАгро",
-           "SBER": "Сбербанк"
-       }
-       await query.edit_message_text("Данные портфеля и список тикеров очищены и сброшены к базовому набору.")
+    query = update.callback_query
+    # Persist before changing in-memory state. History intentionally survives reset.
+    atomic_json(data_file("ledger.json"), {"portfolio": {}, "history": history})
+    portfolio.clear()
+    price_history.clear()
+    last_signal.clear()
+    clear_trade(context)
+    await query.edit_message_text("Портфель очищен. История и список тикеров сохранены.")
 
 async def daily_portfolio_plan_notifier(application, chat_id: int, hours: int = 24):
     """
@@ -2001,18 +1964,16 @@ async def buy_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "/cancel":
         return await buy_cancel(update, context)
 
-    import re
-    nums = re.findall(r"\d+[.,]?\d*", text)
-    if not nums:
-        await update.message.reply_text(
-            "⚠️ Введите число. Пример:\n"
-            "`126.40` — цена за 1 акцию\n"
-            "`252.79` — затем выберите «общая сумма»",
-            parse_mode="Markdown"
-        )
+    if not trade_active(context, "buy"):
+        clear_trade(context)
+        await update.message.reply_text("Сессия истекла. Начните покупку заново.")
+        return ConversationHandler.END
+    try:
+        price_val = parse_money(text)
+    except ValueError as error:
+        await update.message.reply_text(str(error))
         return BUY_PRICE
 
-    price_val = float(nums[0].replace(',', '.'))
     context.user_data['buy_price_raw'] = price_val
 
     # спрашиваем тип цены кнопками
@@ -2022,16 +1983,21 @@ async def buy_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("Общая сумма", callback_data="price_type_total"),
         ]
     ])
-    await update.message.reply_text(
+    prompt = await update.message.reply_text(
         f"Вы ввели {price_val:.2f} ₽.\nУточните, что это за значение:",
         reply_markup=keyboard
     )
+    context.user_data["trade_price_message"] = (prompt.chat.id, prompt.message_id)
     return BUY_PRICE_TYPE
 
 async def price_type_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await safe_answer(query)
     data = query.data
+    if not valid_price_callback(query, context, "buy"):
+        await query.message.reply_text("Эта кнопка устарела. Используйте последнее сообщение операции.")
+        return BUY_PRICE_TYPE
+
 
     if data == "price_type_single":
         context.user_data['price_is_total'] = False
@@ -2065,6 +2031,7 @@ async def send_kb(update: Update, kb: InlineKeyboardMarkup):
     except Exception as e:
         logger.warning(f"Не удалось отправить клавиатуру: {e}")
 
+@limited_action(cooldown=30, timeout=120)
 async def suggest_ideas_by_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Подбор идей под бюджет: параллельно (батчами через семафор), c статистикой и сортировкой."""
     def _score_from_prices_local(prices: List[float]) -> float:
@@ -2126,7 +2093,7 @@ async def suggest_ideas_by_budget(update: Update, context: ContextTypes.DEFAULT_
             await reply_safe(update, "📌 Использование: /ideas <бюджет>\nПример: /ideas 1500")
             return
         try:
-            budget = float(str(context.args[0]).replace(",", "."))
+            budget = parse_money(context.args[0])
         except ValueError:
             await reply_safe(update, "❌ Бюджет должен быть числом. Пример: /ideas 1500")
             return
@@ -2233,13 +2200,19 @@ async def suggest_ideas_by_budget(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def buy_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not trade_active(context, "buy"):
+        clear_trade(context)
+        await update.message.reply_text("Сессия истекла. Начните операцию заново.")
+        return ConversationHandler.END
     text = (update.message.text or "").strip()
     if text == "/cancel":
         return await buy_cancel(update, context)
 
     # количество
     try:
-        amount = int(text)
+        if not text.isascii() or not text.isdigit():
+            raise ValueError("Expected a number of shares")
+        amount = parse_amount(text)
         if amount <= 0:
             await update.message.reply_text("⚠️ Количество должно быть больше нуля.")
             return BUY_AMOUNT
@@ -2271,36 +2244,32 @@ async def buy_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return BUY_PRICE
 
     if context.user_data.get('price_is_total'):
-        price = round(price_raw / amount, 6)
-        await update.message.reply_text(
-            f"💡 Итог: {price_raw:.2f} ₽ за {amount} акц. → {price:.2f} ₽ за 1 акцию."
-        )
+        price = price_raw / amount
     else:
         price = float(price_raw)
-        await update.message.reply_text(f"💡 Цена за 1 акцию: {price:.2f} ₽.")
-
-    # запись в портфель
-    if ticker in portfolio and isinstance(portfolio[ticker], dict) and \
-       portfolio[ticker].get("price") not in (None, 0) and portfolio[ticker].get("amount", 0) > 0:
+    if price < 0.000001 or price > 1_000_000_000:
+        await update.message.reply_text("Цена за акцию вне допустимого диапазона.")
+        return BUY_AMOUNT
+    existing_amount = portfolio.get(ticker, {}).get("amount", 0)
+    if existing_amount + amount > MAX_AMOUNT or ticker not in portfolio and len(portfolio) >= MAX_TICKERS:
+        await update.message.reply_text("Достигнут лимит количества или числа позиций.")
+        return BUY_AMOUNT
+    new_portfolio = dict(portfolio)
+    if ticker in portfolio:
         existing = portfolio[ticker]
         total_amount = existing["amount"] + amount
         avg_price = (existing["price"] * existing["amount"] + price * amount) / total_amount
-        portfolio[ticker] = {"price": round(avg_price, 6), "amount": total_amount}
+        new_portfolio[ticker] = {"price": round(avg_price, 6), "amount": total_amount}
     else:
-        portfolio[ticker] = {"price": price, "amount": amount}
-
-    save_portfolio()
+        new_portfolio[ticker] = {"price": price, "amount": amount}
+    commit_trade(new_portfolio, {
+        "ticker": ticker, "action": "buy", "amount": amount,
+        "price": price, "total": round(price * amount, 2),
+        "ts": datetime.now().isoformat(),
+    })
+    clear_trade(context)
     price_history.pop(ticker, None)
     last_signal.pop(ticker, None)
-
-    history.append({
-        "ticker": ticker,
-        "action": "buy",
-        "amount": amount,
-        "price": price,
-        "total": round(price * amount, 2)
-    })
-    save_history()
 
     keyboard = [[InlineKeyboardButton("Назад", callback_data="main_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2312,6 +2281,7 @@ async def buy_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+@limited_action(cooldown=60, timeout=60)
 async def refresh_candidates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply_safe(update, "⏳ Обновляю список кандидатов (Tinkoff → MOEX fallback)...")
     n = await update_candidates_list()
@@ -2354,6 +2324,9 @@ async def auto_suggest_ideas_daily(budget: float = 3000.0, hour: int = 9):
             
 async def debug_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t = (context.args[0] if context.args else "AFLT").upper()
+    if not valid_ticker(t):
+        await update.message.reply_text("Некорректный тикер")
+        return
     ti = None
     mx = None
 
@@ -2395,6 +2368,7 @@ async def debug_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{t}\nTinkoff: {ti if ti is not None else '—'}\nMOEX: {mx if mx is not None else '—'}"
     )
 async def buy_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    clear_trade(context)
     keyboard = [[InlineKeyboardButton("Назад", callback_data="main_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Покупка отменена.", reply_markup=reply_markup)
@@ -2413,6 +2387,9 @@ async def add_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ticker = args[0].upper()
     name = " ".join(args[1:])
+    if not valid_ticker(ticker) or not 1 <= len(name) <= 100 or any(c in name for c in "*_`[]\n\r") or len(TICKERS) >= MAX_TICKERS:
+        await update.message.reply_text("Некорректный тикер/название или достигнут лимит 100 тикеров.")
+        return
 
     if ticker in TICKERS:
         keyboard = [[InlineKeyboardButton("Назад", callback_data="main_menu")]]
@@ -2423,8 +2400,9 @@ async def add_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    TICKERS[ticker] = name
-    save_tickers()
+    updated = dict(TICKERS, **{ticker: name})
+    atomic_json(TICKERS_FILE, validate_tickers(updated))
+    TICKERS.update(updated)
 
     keyboard = [[InlineKeyboardButton("Назад", callback_data="main_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2439,6 +2417,12 @@ async def add_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
    # --- Финальный main с исправлением 3 ---
 async def main():
+    allowed = allowed_user_ids()
+    if CHAT_ID not in allowed:
+        raise ValueError("CHAT_ID must be an allowed private user ID")
+    if not TELEGRAM_TOKEN or not TINKOFF_TOKEN:
+        raise ValueError("TELEGRAM_TOKEN and TINKOFF_TOKEN are required")
+    prepare_storage()
     # Загрузка данных
     load_tickers()
     load_portfolio()
@@ -2477,6 +2461,7 @@ async def main():
         http_version="1.1",
     )
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).request(request).build()
+    application.add_handler(TypeHandler(Update, make_access_guard(allowed)), group=-100)
 
     # --- ConversationHandler: покупка ---
     conv_handler = ConversationHandler(
@@ -2597,9 +2582,7 @@ async def main():
                 await TCS_CLIENT_CTX.__aexit__(None, None, None)
             finally:
                 pass
-        save_tickers()
-        save_portfolio()
-        save_history()
+        # Each mutation is already persisted; never overwrite data on shutdown.
 
 
 

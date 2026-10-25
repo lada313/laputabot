@@ -1,20 +1,21 @@
 import os
-from flask import Flask
 from threading import Thread
+from flask import Flask
+from waitress import serve
 
-app = Flask('')
+app = Flask(__name__)
+
 
 @app.route('/')
-def home():
-    return "Цой жив!"
-
 @app.route('/health')
 def health():
-    return "OK"
+    return 'OK'
+
 
 def run():
-    port = int(os.environ.get("PORT", 8080))  # <- ключевая правка
-    app.run(host='0.0.0.0', port=port)
+    serve(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)),
+          threads=2, connection_limit=64, channel_timeout=30)
+
 
 def keep_alive():
     Thread(target=run, daemon=True).start()

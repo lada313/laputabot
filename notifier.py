@@ -7,17 +7,17 @@ import time
 from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from analysis import get_liquidity_metrics, analyze_stock
-from save_json import enqueue_git_push
+from storage import data_file, read_json, atomic_json
 
 PARALLEL_LIMIT = int(os.getenv("PARALLEL_LIMIT", "8"))  # можно менять через ENV
 ANALYSIS_LIMIT = int(os.getenv("ANALYSIS_LIMIT", "4"))
 _analysis_sem = asyncio.Semaphore(ANALYSIS_LIMIT)
 logger = logging.getLogger("notifier")
 
-OPEN_TRADES_FILE = "open_trades.json"
+OPEN_TRADES_FILE = data_file("open_trades.json")
 SCAN_CANDIDATES = os.getenv("SCAN_CANDIDATES", "0") == "1"
 MAX_NEW_SIGNALS_PER_CYCLE = int(os.getenv("MAX_NEW_SIGNALS_PER_CYCLE", "3"))
-CANDIDATES_FILE = "candidates.json"
+CANDIDATES_FILE = data_file("candidates.json")
 TP1_PCT = 0.05   # +5%
 TP2_PCT = 0.10   # +10%
 SL_PCT  = 0.03   # -3%
@@ -55,35 +55,20 @@ def _calc_position_size(entry: float, sl: float, lot_size: int) -> int:
     return shares
 
 def _load_open_trades() -> dict:
-    try:
-        if os.path.exists(OPEN_TRADES_FILE):
-            if os.path.getsize(OPEN_TRADES_FILE) == 0:
-                # пустой файл — инициализируем словарём
-                _save_open_trades({})
-                return {}
-            with open(OPEN_TRADES_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data if isinstance(data, dict) else {}
-        else:
-            _save_open_trades({})
-        return {}
-    except Exception as e:
-        logger.warning(f"Не удалось прочитать {OPEN_TRADES_FILE}: {e}")
-        return {}
+    data = read_json(OPEN_TRADES_FILE, {})
+    if not isinstance(data, dict):
+        raise ValueError("Invalid open trades structure")
+    return data
+
 
 def _save_open_trades(data: dict) -> None:
-    try:
-        if not isinstance(data, dict):
-            raise ValueError("⚠️ Неверный формат данных open_trades")
-        with open(OPEN_TRADES_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        enqueue_git_push("Update open_trades.json")
-    except Exception as e:
-        logger.warning(f"Не удалось сохранить {OPEN_TRADES_FILE}: {e}")
+    if not isinstance(data, dict):
+        raise ValueError("Invalid open trades structure")
+    atomic_json(OPEN_TRADES_FILE, data)
 
 async def notify_price_changes(application, TICKERS, portfolio, last_signal, CHAT_ID,
                                get_moex_price_func, calculate_rsi_func,
-                               lots_map=None, candidates_file="candidates.json"):
+                               lots_map=None, candidates_file=CANDIDATES_FILE):
     first_run = True
     last_price_signal = {}
     last_alert_at = {}               # антиспам по времени для «отслежки»
